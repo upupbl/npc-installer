@@ -3,6 +3,7 @@ set -eu
 
 VERSION="${NPC_VERSION:-0.26.10}"
 RELEASE_BASE="${NPC_RELEASE_BASE:-https://github.com/ehang-io/nps/releases/download}"
+DEFAULT_SERVER="${NPC_DEFAULT_SERVER:-23.141.12.66:8024}"
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
@@ -16,16 +17,16 @@ case "$OS" in
 esac
 
 case "$ARCH" in
-  x86_64|amd64)      PKG="linux_amd64_client.tar.gz" ;;
+  x86_64|amd64)            PKG="linux_amd64_client.tar.gz" ;;
   i386|i486|i586|i686|x86) PKG="linux_386_client.tar.gz" ;;
-  aarch64|arm64)     PKG="linux_arm64_client.tar.gz" ;;
-  armv7l|armv7*)     PKG="linux_arm_v7_client.tar.gz" ;;
-  armv6l|armv6*)     PKG="linux_arm_v6_client.tar.gz" ;;
-  armv5l|armv5*)     PKG="linux_arm_v5_client.tar.gz" ;;
-  mips64el|mips64le) PKG="linux_mips64le_client.tar.gz" ;;
-  mips64)            PKG="linux_mips64_client.tar.gz" ;;
-  mipsel|mipsle)     PKG="linux_mipsle_client.tar.gz" ;;
-  mips)              PKG="linux_mips_client.tar.gz" ;;
+  aarch64|arm64)           PKG="linux_arm64_client.tar.gz" ;;
+  armv7l|armv7*)           PKG="linux_arm_v7_client.tar.gz" ;;
+  armv6l|armv6*)           PKG="linux_arm_v6_client.tar.gz" ;;
+  armv5l|armv5*)           PKG="linux_arm_v5_client.tar.gz" ;;
+  mips64el|mips64le)       PKG="linux_mips64le_client.tar.gz" ;;
+  mips64)                  PKG="linux_mips64_client.tar.gz" ;;
+  mipsel|mipsle)           PKG="linux_mipsle_client.tar.gz" ;;
+  mips)                    PKG="linux_mips_client.tar.gz" ;;
   *) die "Unsupported architecture: $ARCH" ;;
 esac
 
@@ -80,18 +81,97 @@ done
 
 [ -n "$INSTALL_DIR" ] || die "Could not find a writable and executable install directory. Set NPC_INSTALL_DIR to a persistent executable path."
 
-say "[NPC] Installed successfully: $INSTALL_DIR/npc"
-"$INSTALL_DIR/npc" -version
+NPC_BIN="$INSTALL_DIR/npc"
+LOG_FILE="$INSTALL_DIR/npc.log"
+
+say "[NPC] Installed successfully: $NPC_BIN"
+"$NPC_BIN" -version
 
 if [ "$IS_ROOT" = "1" ] && [ -d /usr/local/bin ] && [ -w /usr/local/bin ]; then
-  ln -sf "$INSTALL_DIR/npc" /usr/local/bin/npc 2>/dev/null || true
+  ln -sf "$NPC_BIN" /usr/local/bin/npc 2>/dev/null || true
 fi
 
-cat <<EOF2
+SERVER="${NPC_SERVER:-}"
+VKEY="${NPC_VKEY:-}"
+TYPE="${NPC_TYPE:-tcp}"
 
-Usage:
-  $INSTALL_DIR/npc -server=SERVER_IP:PORT -vkey=YOUR_VKEY -type=tcp
+if [ -z "$SERVER" ]; then
+  if [ -t 0 ]; then
+    printf '\nNPS server [%s]: ' "$DEFAULT_SERVER"
+    read -r SERVER_INPUT || true
+    SERVER="${SERVER_INPUT:-$DEFAULT_SERVER}"
+  else
+    SERVER="$DEFAULT_SERVER"
+  fi
+fi
 
-Example:
-  $INSTALL_DIR/npc -server=1.2.3.4:8024 -vkey=YOUR_VKEY -type=tcp
+if [ -z "$VKEY" ]; then
+  if [ -t 0 ]; then
+    printf 'VKey: '
+    if command -v stty >/dev/null 2>&1; then
+      stty -echo 2>/dev/null || true
+      read -r VKEY || true
+      stty echo 2>/dev/null || true
+      printf '\n'
+    else
+      read -r VKEY || true
+    fi
+  fi
+fi
+
+if [ -z "$VKEY" ]; then
+  cat <<EOF2
+
+[NPC] Installation finished. VKey was not supplied, so NPC was not started.
+Run manually:
+  $NPC_BIN -server=$SERVER -vkey=YOUR_VKEY -type=$TYPE
+
+Or install/start non-interactively:
+  NPC_SERVER='$SERVER' NPC_VKEY='YOUR_VKEY' sh -c "\$(curl -kfsSL https://raw.githubusercontent.com/upupbl/npc-installer/main/install.sh)"
 EOF2
+  exit 0
+fi
+
+# Avoid starting a second exact npc process when one is already running.
+if command -v pidof >/dev/null 2>&1 && pidof npc >/dev/null 2>&1; then
+  say "[NPC] An npc process is already running. Installation completed; no second process was started."
+  say "[NPC] Check with: pidof npc"
+  exit 0
+fi
+
+: > "$LOG_FILE" 2>/dev/null || true
+
+if command -v setsid >/dev/null 2>&1; then
+  setsid "$NPC_BIN" -server="$SERVER" -vkey="$VKEY" -type="$TYPE" </dev/null >>"$LOG_FILE" 2>&1 &
+  NPC_PID=$!
+  DETACH_METHOD="setsid"
+elif command -v nohup >/dev/null 2>&1; then
+  nohup "$NPC_BIN" -server="$SERVER" -vkey="$VKEY" -type="$TYPE" </dev/null >>"$LOG_FILE" 2>&1 &
+  NPC_PID=$!
+  DETACH_METHOD="nohup"
+elif command -v busybox >/dev/null 2>&1 && busybox nohup true >/dev/null 2>&1; then
+  busybox nohup "$NPC_BIN" -server="$SERVER" -vkey="$VKEY" -type="$TYPE" </dev/null >>"$LOG_FILE" 2>&1 &
+  NPC_PID=$!
+  DETACH_METHOD="busybox nohup"
+else
+  "$NPC_BIN" -server="$SERVER" -vkey="$VKEY" -type="$TYPE" </dev/null >>"$LOG_FILE" 2>&1 &
+  NPC_PID=$!
+  DETACH_METHOD="shell background (may stop after logout on some systems)"
+fi
+
+sleep 2
+
+if kill -0 "$NPC_PID" 2>/dev/null; then
+  say "[NPC] Started successfully in background."
+  say "[NPC] PID: $NPC_PID"
+  say "[NPC] Server: $SERVER"
+  say "[NPC] Detach: $DETACH_METHOD"
+  say "[NPC] Log: $LOG_FILE"
+  if command -v tail >/dev/null 2>&1; then
+    tail -n 10 "$LOG_FILE" 2>/dev/null || true
+  fi
+else
+  say "[NPC] Process exited shortly after start. Log follows:"
+  cat "$LOG_FILE" 2>/dev/null || true
+  exit 1
+fi
