@@ -2,7 +2,7 @@
 set -eu
 
 VERSION="${NPC_VERSION:-0.26.10}"
-RELEASE_BASE="${NPC_RELEASE_BASE:-https://github.com/ehang-io/nps/releases/download}"
+RELEASE_BASE="${NPC_RELEASE_BASE:-https://dl.runsh.de/npc}"
 DEFAULT_SERVER="${NPC_DEFAULT_SERVER:-23.141.12.66:8024}"
 
 say() { printf '%s\n' "$*"; }
@@ -71,7 +71,6 @@ fi
 
 for dir in $CANDIDATES; do
   if mkdir -p "$dir" 2>/dev/null && cp "$TMP_DIR/npc" "$dir/npc" 2>/dev/null && chmod 755 "$dir/npc" 2>/dev/null; then
-    # Many NAS mount /tmp (and occasionally other paths) with noexec, so verify execution.
     if "$dir/npc" -version >/dev/null 2>&1; then
       INSTALL_DIR="$dir"
       break
@@ -132,7 +131,6 @@ EOF2
   exit 0
 fi
 
-# Avoid starting a second exact npc process when one is already running.
 if command -v pidof >/dev/null 2>&1 && pidof npc >/dev/null 2>&1; then
   say "[NPC] An npc process is already running. Installation completed; no second process was started."
   say "[NPC] Check with: pidof npc"
