@@ -86,24 +86,42 @@ C:\npc\npc.log
 C:\npc\npc-error.log
 ```
 
-## Change download mirror later
+## Package mirror
 
-The current package source is:
+The default package source is:
 
 ```text
-https://github.com/ehang-io/nps/releases/download
+https://dl.runsh.de/npc
 ```
+
+The installer builds package URLs as:
+
+```text
+https://dl.runsh.de/npc/v0.26.10/<package-name>
+```
+
+Examples:
+
+```text
+https://dl.runsh.de/npc/v0.26.10/linux_amd64_client.tar.gz
+https://dl.runsh.de/npc/v0.26.10/linux_arm64_client.tar.gz
+https://dl.runsh.de/npc/v0.26.10/linux_arm_v7_client.tar.gz
+https://dl.runsh.de/npc/v0.26.10/windows_amd64_client.tar.gz
+https://dl.runsh.de/npc/v0.26.10/windows_386_client.tar.gz
+```
+
+You can temporarily override the mirror without editing the scripts.
 
 Linux example:
 
 ```sh
-NPC_RELEASE_BASE='https://your-mirror.example.com/nps/releases/download' sh -c "$(curl -kfsSL https://raw.githubusercontent.com/upupbl/npc-installer/main/install.sh)"
+NPC_RELEASE_BASE='https://another.example.com/npc' sh -c "$(curl -kfsSL https://raw.githubusercontent.com/upupbl/npc-installer/main/install.sh)"
 ```
 
 Windows example:
 
 ```powershell
-$env:NPC_RELEASE_BASE='https://your-mirror.example.com/nps/releases/download'; irm https://raw.githubusercontent.com/upupbl/npc-installer/main/install.ps1 | iex
+$env:NPC_RELEASE_BASE='https://another.example.com/npc'; irm https://raw.githubusercontent.com/upupbl/npc-installer/main/install.ps1 | iex
 ```
 
 Do not commit real VKeys to a public repository.
