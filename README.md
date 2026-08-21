@@ -66,12 +66,40 @@ Run PowerShell as Administrator:
 powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/upupbl/npc-installer/main/install.ps1 | iex"
 ```
 
-After installation it asks for the NPS server and VKey, then starts `C:\npc\npc.exe` in the background.
+The Windows installer now also installs and configures OpenSSH Server by default. It will:
 
-Supported Windows architectures:
+- skip the OpenSSH package download if the `sshd` service already exists;
+- otherwise download `https://dl.runsh.de/ssh/OpenSSH-Win64.zip`;
+- install OpenSSH under `C:\OpenSSH-Win64`;
+- set `sshd` to start automatically;
+- start the `sshd` service;
+- create/enable a Windows Firewall inbound rule for TCP port 22;
+- then ask for the NPS server and VKey and start `C:\npc\npc.exe` in the background.
+
+Because OpenSSH Server installation changes Windows services and firewall settings, the default Windows installer must be run from an Administrator PowerShell window.
+
+Supported Windows NPC architectures:
 
 - 64-bit x86 -> windows_amd64_client.tar.gz
 - 32-bit x86 -> windows_386_client.tar.gz
+
+The default bundled OpenSSH download is the Win64 package. On 32-bit Windows, either provide a compatible SSH ZIP with `NPC_SSH_ZIP_URL` or skip SSH installation.
+
+### Skip OpenSSH installation
+
+If you only want to install NPC:
+
+```powershell
+$env:NPC_INSTALL_SSH='0'; irm https://raw.githubusercontent.com/upupbl/npc-installer/main/install.ps1 | iex
+```
+
+### Override the OpenSSH ZIP source
+
+```powershell
+$env:NPC_SSH_ZIP_URL='https://example.com/OpenSSH-Win64.zip'; irm https://raw.githubusercontent.com/upupbl/npc-installer/main/install.ps1 | iex
+```
+
+You can also override the OpenSSH install directory with `NPC_SSH_INSTALL_DIR`.
 
 ### Windows non-interactive mode
 
@@ -84,6 +112,14 @@ Logs are written to:
 ```text
 C:\npc\npc.log
 C:\npc\npc-error.log
+```
+
+Windows-specific optional variables:
+
+```text
+NPC_INSTALL_SSH
+NPC_SSH_ZIP_URL
+NPC_SSH_INSTALL_DIR
 ```
 
 ## Package mirror
