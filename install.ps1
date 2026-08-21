@@ -5,6 +5,136 @@ $ReleaseBase = if ($env:NPC_RELEASE_BASE) { $env:NPC_RELEASE_BASE.TrimEnd('/') }
 $InstallDir = if ($env:NPC_INSTALL_DIR) { $env:NPC_INSTALL_DIR } else { 'C:\npc' }
 $DefaultServer = if ($env:NPC_DEFAULT_SERVER) { $env:NPC_DEFAULT_SERVER } else { '23.141.12.66:8024' }
 
+# OpenSSH Server is installed by default on Windows.
+# Set NPC_INSTALL_SSH=0 to skip it.
+$InstallSsh = -not ($env:NPC_INSTALL_SSH -match '^(0|false|no|off)$')
+$SshZipUrl = if ($env:NPC_SSH_ZIP_URL) { $env:NPC_SSH_ZIP_URL } else { 'https://dl.runsh.de/ssh/OpenSSH-Win64.zip' }
+$SshInstallDir = if ($env:NPC_SSH_INSTALL_DIR) { $env:NPC_SSH_INSTALL_DIR } else { 'C:\OpenSSH-Win64' }
+
+function Test-IsAdministrator {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Ensure-SshFirewallRule {
+    $ruleName = 'OpenSSH-Server-In-TCP'
+    $getFirewallRule = Get-Command Get-NetFirewallRule -ErrorAction SilentlyContinue
+    $newFirewallRule = Get-Command New-NetFirewallRule -ErrorAction SilentlyContinue
+
+    if ($getFirewallRule -and $newFirewallRule) {
+        $rule = Get-NetFirewallRule -Name $ruleName -ErrorAction SilentlyContinue
+        if (-not $rule) {
+            New-NetFirewallRule `
+                -Name $ruleName `
+                -DisplayName 'OpenSSH SSH Server (sshd)' `
+                -Enabled True `
+                -Direction Inbound `
+                -Protocol TCP `
+                -Action Allow `
+                -LocalPort 22 | Out-Null
+            Write-Host '[SSH] Firewall rule created for TCP/22.'
+        }
+        elseif ($rule.Enabled -ne 'True') {
+            Enable-NetFirewallRule -Name $ruleName | Out-Null
+            Write-Host '[SSH] Firewall rule enabled for TCP/22.'
+        }
+        else {
+            Write-Host '[SSH] Firewall rule for TCP/22 already exists.'
+        }
+        return
+    }
+
+    Write-Host '[SSH] NetSecurity cmdlets unavailable; using netsh for TCP/22.'
+    & netsh advfirewall firewall add rule name='OpenSSH SSH Server (sshd)' dir=in action=allow protocol=TCP localport=22 | Out-Null
+}
+
+function Install-OpenSshServer {
+    if (-not $InstallSsh) {
+        Write-Host '[SSH] Skipped because NPC_INSTALL_SSH disables SSH installation.'
+        return
+    }
+
+    if (-not (Test-IsAdministrator)) {
+        throw 'Administrator privileges are required to install and start OpenSSH Server. Re-run PowerShell as Administrator, or set NPC_INSTALL_SSH=0 to skip SSH.'
+    }
+
+    $service = Get-Service sshd -ErrorAction SilentlyContinue
+
+    if (-not $service) {
+        if (-not [Environment]::Is64BitOperatingSystem -and -not $env:NPC_SSH_ZIP_URL) {
+            throw 'The default OpenSSH package is Win64, but this Windows installation is 32-bit. Set NPC_SSH_ZIP_URL to a compatible package or NPC_INSTALL_SSH=0.'
+        }
+
+        $sshTmp = Join-Path $env:TEMP ('openssh-install-' + [guid]::NewGuid().ToString('N'))
+        $sshArchive = Join-Path $sshTmp 'OpenSSH.zip'
+        $sshExtract = Join-Path $sshTmp 'extract'
+
+        New-Item -ItemType Directory -Path $sshExtract -Force | Out-Null
+
+        try {
+            Write-Host '[SSH] sshd service not found. Installing OpenSSH Server...'
+            Write-Host "[SSH] Download: $SshZipUrl"
+
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+            Invoke-WebRequest -UseBasicParsing -Uri $SshZipUrl -OutFile $sshArchive
+
+            Write-Host '[SSH] Extracting package...'
+            Expand-Archive -Path $sshArchive -DestinationPath $sshExtract -Force
+
+            $installer = Get-ChildItem -Path $sshExtract -Filter 'install-sshd.ps1' -File -Recurse | Select-Object -First 1
+            if (-not $installer) {
+                throw 'install-sshd.ps1 was not found after extracting the OpenSSH package.'
+            }
+
+            $sourceDir = $installer.Directory.FullName
+            New-Item -ItemType Directory -Path $SshInstallDir -Force | Out-Null
+            Get-ChildItem -LiteralPath $sourceDir -Force | Copy-Item -Destination $SshInstallDir -Recurse -Force
+
+            $targetInstaller = Join-Path $SshInstallDir 'install-sshd.ps1'
+            if (-not (Test-Path $targetInstaller)) {
+                throw "OpenSSH installer was not copied to $targetInstaller"
+            }
+
+            Write-Host "[SSH] Install directory: $SshInstallDir"
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $targetInstaller
+            if ($LASTEXITCODE -ne 0) {
+                throw "install-sshd.ps1 exited with code $LASTEXITCODE"
+            }
+        }
+        finally {
+            Remove-Item $sshTmp -Recurse -Force -ErrorAction SilentlyContinue
+        }
+
+        $service = Get-Service sshd -ErrorAction SilentlyContinue
+        if (-not $service) {
+            throw 'OpenSSH installer completed, but the sshd service was not found.'
+        }
+    }
+    else {
+        Write-Host '[SSH] sshd service already exists. Package installation skipped.'
+    }
+
+    Set-Service sshd -StartupType Automatic
+
+    $service = Get-Service sshd
+    if ($service.Status -ne 'Running') {
+        Start-Service sshd
+    }
+
+    Ensure-SshFirewallRule
+
+    $service = Get-Service sshd
+    Write-Host '[SSH] OpenSSH Server is ready.'
+    Write-Host "[SSH] Service status: $($service.Status)"
+    Write-Host '[SSH] Startup type: Automatic'
+    Write-Host '[SSH] Listening port: TCP/22'
+}
+
+if ($InstallSsh -and -not (Test-IsAdministrator)) {
+    throw 'This installer now installs OpenSSH Server by default and must be run from an Administrator PowerShell window. Set NPC_INSTALL_SSH=0 if SSH is not needed.'
+}
+
 $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
 switch ($arch) {
     'X64' { $pkg = 'windows_amd64_client.tar.gz' }
@@ -44,6 +174,8 @@ try {
 finally {
     Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }
+
+Install-OpenSshServer
 
 $Server = $env:NPC_SERVER
 if ([string]::IsNullOrWhiteSpace($Server)) {
