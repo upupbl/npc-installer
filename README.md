@@ -7,13 +7,13 @@ Automatically detects the platform/architecture, downloads NPS v0.26.10 NPC, ins
 Recommended for NAS/embedded systems:
 
 ```sh
-sh -c "$(curl -kfsSL https://raw.githubusercontent.com/upupbl/npc-installer/main/install.sh)"
+sh -c "$(curl -kfsSL https://dl.runsh.de/npc/install.sh)"
 ```
 
 If Bash is available:
 
 ```bash
-bash -c "$(curl --insecure -fsSL https://raw.githubusercontent.com/upupbl/npc-installer/main/install.sh)"
+bash -c "$(curl --insecure -fsSL https://dl.runsh.de/npc/install.sh)"
 ```
 
 After installation the script asks:
@@ -43,7 +43,7 @@ NPC is started in the background using `setsid`, `nohup`, or BusyBox `nohup` whe
 You can provide connection information without prompts:
 
 ```sh
-NPC_SERVER='23.141.12.66:8024' NPC_VKEY='YOUR_VKEY' sh -c "$(curl -kfsSL https://raw.githubusercontent.com/upupbl/npc-installer/main/install.sh)"
+NPC_SERVER='23.141.12.66:8024' NPC_VKEY='YOUR_VKEY' sh -c "$(curl -kfsSL https://dl.runsh.de/npc/install.sh)"
 ```
 
 Optional variables:
@@ -151,7 +151,7 @@ You can temporarily override the mirror without editing the scripts.
 Linux example:
 
 ```sh
-NPC_RELEASE_BASE='https://another.example.com/npc' sh -c "$(curl -kfsSL https://raw.githubusercontent.com/upupbl/npc-installer/main/install.sh)"
+NPC_RELEASE_BASE='https://another.example.com/npc' sh -c "$(curl -kfsSL https://dl.runsh.de/npc/install.sh)"
 ```
 
 Windows example:

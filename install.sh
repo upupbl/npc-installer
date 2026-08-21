@@ -126,7 +126,7 @@ Run manually:
   $NPC_BIN -server=$SERVER -vkey=YOUR_VKEY -type=$TYPE
 
 Or install/start non-interactively:
-  NPC_SERVER='$SERVER' NPC_VKEY='YOUR_VKEY' sh -c "\$(curl -kfsSL https://raw.githubusercontent.com/upupbl/npc-installer/main/install.sh)"
+  NPC_SERVER='$SERVER' NPC_VKEY='YOUR_VKEY' sh -c "\$(curl -kfsSL https://dl.runsh.de/npc/install.sh)"
 EOF2
   exit 0
 fi
