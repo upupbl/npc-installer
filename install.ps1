@@ -5,6 +5,20 @@ $ReleaseBase = if ($env:NPC_RELEASE_BASE) { $env:NPC_RELEASE_BASE.TrimEnd('/') }
 $InstallDir = if ($env:NPC_INSTALL_DIR) { $env:NPC_INSTALL_DIR } else { 'C:\npc' }
 $DefaultServer = if ($env:NPC_DEFAULT_SERVER) { $env:NPC_DEFAULT_SERVER } else { '23.141.12.66:8024' }
 
+$TimeoutSeconds = 0
+if ($env:NPC_TIMEOUT) {
+    if (-not [int]::TryParse($env:NPC_TIMEOUT, [ref]$TimeoutSeconds) -or $TimeoutSeconds -lt 0) {
+        throw 'NPC_TIMEOUT must be a whole number of seconds (0 means no timeout).'
+    }
+}
+
+$RequestedSshPort = 0
+if ($env:NPC_SSH_PORT) {
+    if (-not [int]::TryParse($env:NPC_SSH_PORT, [ref]$RequestedSshPort) -or $RequestedSshPort -lt 1 -or $RequestedSshPort -gt 65535) {
+        throw 'NPC_SSH_PORT must be a port number from 1 to 65535.'
+    }
+}
+
 # OpenSSH Server is installed by default on Windows.
 # Set NPC_INSTALL_SSH=0 to skip it.
 $InstallSsh = -not ($env:NPC_INSTALL_SSH -match '^(0|false|no|off)$')
@@ -18,7 +32,9 @@ function Test-IsAdministrator {
 }
 
 function Ensure-SshFirewallRule {
-    $ruleName = 'OpenSSH-Server-In-TCP'
+    param([Parameter(Mandatory = $true)][int]$Port)
+
+    $ruleName = if ($Port -eq 22) { 'OpenSSH-Server-In-TCP' } else { "NPC-OpenSSH-In-TCP-$Port" }
     $getFirewallRule = Get-Command Get-NetFirewallRule -ErrorAction SilentlyContinue
     $newFirewallRule = Get-Command New-NetFirewallRule -ErrorAction SilentlyContinue
 
@@ -32,21 +48,67 @@ function Ensure-SshFirewallRule {
                 -Direction Inbound `
                 -Protocol TCP `
                 -Action Allow `
-                -LocalPort 22 | Out-Null
-            Write-Host '[SSH] Firewall rule created for TCP/22.'
+                -LocalPort $Port | Out-Null
+            Write-Host "[SSH] Firewall rule created for TCP/$Port."
         }
         elseif ($rule.Enabled -ne 'True') {
             Enable-NetFirewallRule -Name $ruleName | Out-Null
-            Write-Host '[SSH] Firewall rule enabled for TCP/22.'
+            Write-Host "[SSH] Firewall rule enabled for TCP/$Port."
         }
         else {
-            Write-Host '[SSH] Firewall rule for TCP/22 already exists.'
+            Write-Host "[SSH] Firewall rule for TCP/$Port already exists."
         }
         return
     }
 
-    Write-Host '[SSH] NetSecurity cmdlets unavailable; using netsh for TCP/22.'
-    & netsh advfirewall firewall add rule name='OpenSSH SSH Server (sshd)' dir=in action=allow protocol=TCP localport=22 | Out-Null
+    Write-Host "[SSH] NetSecurity cmdlets unavailable; using netsh for TCP/$Port."
+    & netsh advfirewall firewall add rule name="NPC OpenSSH Server TCP $Port" dir=in action=allow protocol=TCP localport=$Port | Out-Null
+}
+
+function Get-SshListeningPorts {
+    $ports = @()
+
+    try {
+        $serviceInfo = Get-CimInstance Win32_Service -Filter "Name='sshd'" -ErrorAction Stop
+        if ($serviceInfo.ProcessId -gt 0 -and (Get-Command Get-NetTCPConnection -ErrorAction SilentlyContinue)) {
+            $ports = @(Get-NetTCPConnection -State Listen -OwningProcess $serviceInfo.ProcessId -ErrorAction Stop |
+                Select-Object -ExpandProperty LocalPort -Unique)
+        }
+    }
+    catch {
+        $ports = @()
+    }
+
+    if ($ports.Count -eq 0) {
+        $configPath = Join-Path $env:ProgramData 'ssh\sshd_config'
+        if (Test-Path $configPath) {
+            $ports = @(Get-Content $configPath -ErrorAction SilentlyContinue | ForEach-Object {
+                if ($_ -match '^\s*Port\s+(\d+)\s*(?:#.*)?$') {
+                    [int]$Matches[1]
+                }
+            } | Select-Object -Unique)
+        }
+    }
+
+    if ($ports.Count -eq 0) {
+        $ports = @(22)
+    }
+
+    return $ports
+}
+
+function Resolve-SshPort {
+    $detectedPorts = @(Get-SshListeningPorts)
+
+    if ($RequestedSshPort -gt 0) {
+        if ($InstallSsh -and $detectedPorts -notcontains $RequestedSshPort) {
+            $detectedText = $detectedPorts -join ', '
+            throw "NPC_SSH_PORT is $RequestedSshPort, but sshd is listening on: $detectedText. Use the actual SSH port."
+        }
+        return $RequestedSshPort
+    }
+
+    return [int]$detectedPorts[0]
 }
 
 function Install-OpenSshServer {
@@ -122,13 +184,10 @@ function Install-OpenSshServer {
         Start-Service sshd
     }
 
-    Ensure-SshFirewallRule
-
     $service = Get-Service sshd
     Write-Host '[SSH] OpenSSH Server is ready.'
     Write-Host "[SSH] Service status: $($service.Status)"
     Write-Host '[SSH] Startup type: Automatic'
-    Write-Host '[SSH] Listening port: TCP/22'
 }
 
 if ($InstallSsh -and -not (Test-IsAdministrator)) {
@@ -177,6 +236,12 @@ finally {
 
 Install-OpenSshServer
 
+$SshPort = Resolve-SshPort
+if ($InstallSsh) {
+    Ensure-SshFirewallRule -Port $SshPort
+}
+Write-Host "[SSH] Listening port used for the NPS target: TCP/$SshPort"
+
 $Server = $env:NPC_SERVER
 if ([string]::IsNullOrWhiteSpace($Server)) {
     $inputServer = Read-Host "NPS server [$DefaultServer]"
@@ -224,7 +289,57 @@ if (-not $proc.HasExited) {
     Write-Host '[NPC] Started successfully in background.'
     Write-Host "[NPC] PID: $($proc.Id)"
     Write-Host "[NPC] Server: $Server"
+    Write-Host "[NPC] Local SSH target: 127.0.0.1:$SshPort"
     Write-Host "[NPC] Log: $logOut"
+
+    if ($TimeoutSeconds -gt 0) {
+        $watchdogPath = Join-Path $InstallDir 'npc-timeout-watchdog.ps1'
+        $watchdogLog = Join-Path $InstallDir 'npc-watchdog.log'
+        $watchdogContent = @'
+param(
+    [Parameter(Mandatory = $true)][int]$TargetProcessId,
+    [Parameter(Mandatory = $true)][int]$TimeoutSeconds,
+    [Parameter(Mandatory = $true)][string]$ExpectedPath,
+    [Parameter(Mandatory = $true)][string]$LogPath
+)
+
+Start-Sleep -Seconds $TimeoutSeconds
+
+try {
+    $target = Get-Process -Id $TargetProcessId -ErrorAction Stop
+}
+catch {
+    exit 0
+}
+
+try {
+    $actualPath = $target.Path
+}
+catch {
+    $actualPath = $null
+}
+
+if ($actualPath -and -not $actualPath.Equals($ExpectedPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+    exit 0
+}
+
+Add-Content -Path $LogPath -Value "$(Get-Date -Format o) [NPC] Session timeout reached; stopping PID $TargetProcessId."
+Stop-Process -Id $TargetProcessId -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 5
+Stop-Process -Id $TargetProcessId -Force -ErrorAction SilentlyContinue
+'@
+        Set-Content -Path $watchdogPath -Value $watchdogContent -Encoding UTF8
+
+        $watchdogArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$watchdogPath`" -TargetProcessId $($proc.Id) -TimeoutSeconds $TimeoutSeconds -ExpectedPath `"$installed`" -LogPath `"$watchdogLog`""
+        Start-Process -FilePath 'powershell.exe' -ArgumentList $watchdogArgs -WindowStyle Hidden | Out-Null
+
+        Write-Host "[NPC] Automatic stop: $TimeoutSeconds seconds"
+        Write-Host "[NPC] Watchdog log: $watchdogLog"
+    }
+    else {
+        Write-Host '[NPC] Automatic stop: disabled'
+    }
+
     if (Test-Path $logOut) { Get-Content $logOut -Tail 10 -ErrorAction SilentlyContinue }
     if (Test-Path $logErr) { Get-Content $logErr -Tail 10 -ErrorAction SilentlyContinue }
 }
