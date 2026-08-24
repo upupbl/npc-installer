@@ -56,6 +56,14 @@ NPC_DEFAULT_SERVER
 NPC_SERVER
 NPC_VKEY
 NPC_TYPE
+NPC_TIMEOUT        # seconds; 0 or unset means no automatic stop
+NPC_SSH_PORT       # local SSH target port; defaults to 22
+```
+
+Temporary four-hour session using a non-default local SSH port:
+
+```sh
+NPC_SERVER='23.141.12.66:8024' NPC_VKEY='YOUR_VKEY' NPC_TIMEOUT='14400' NPC_SSH_PORT='2222' sh -c "$(curl -kfsSL https://dl.runsh.de/npc/install.sh)"
 ```
 
 ## Windows
@@ -107,6 +115,18 @@ You can also override the OpenSSH install directory with `NPC_SSH_INSTALL_DIR`.
 $env:NPC_SERVER='23.141.12.66:8024'; $env:NPC_VKEY='YOUR_VKEY'; irm https://raw.githubusercontent.com/upupbl/npc-installer/main/install.ps1 | iex
 ```
 
+Temporary four-hour session using the detected/default SSH port:
+
+```powershell
+$env:NPC_SERVER='23.141.12.66:8024'; $env:NPC_VKEY='YOUR_VKEY'; $env:NPC_TIMEOUT='14400'; irm https://raw.githubusercontent.com/upupbl/npc-installer/main/install.ps1 | iex
+```
+
+If OpenSSH already listens on a non-default port, provide it explicitly. The installer validates the requested port against the running `sshd` service before starting NPC:
+
+```powershell
+$env:NPC_SERVER='23.141.12.66:8024'; $env:NPC_VKEY='YOUR_VKEY'; $env:NPC_TIMEOUT='14400'; $env:NPC_SSH_PORT='2222'; irm https://raw.githubusercontent.com/upupbl/npc-installer/main/install.ps1 | iex
+```
+
 Logs are written to:
 
 ```text
@@ -120,6 +140,8 @@ Windows-specific optional variables:
 NPC_INSTALL_SSH
 NPC_SSH_ZIP_URL
 NPC_SSH_INSTALL_DIR
+NPC_TIMEOUT
+NPC_SSH_PORT
 ```
 
 ## Package mirror
