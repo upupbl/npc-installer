@@ -4,9 +4,22 @@ set -eu
 VERSION="${NPC_VERSION:-0.26.10}"
 RELEASE_BASE="${NPC_RELEASE_BASE:-https://dl.runsh.de/npc}"
 DEFAULT_SERVER="${NPC_DEFAULT_SERVER:-23.141.12.66:8024}"
+TIMEOUT="${NPC_TIMEOUT:-0}"
+SSH_PORT="${NPC_SSH_PORT:-22}"
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+
+case "$TIMEOUT" in
+  ''|*[!0-9]*) die "NPC_TIMEOUT must be a whole number of seconds (0 means no timeout)." ;;
+esac
+
+case "$SSH_PORT" in
+  ''|*[!0-9]*) die "NPC_SSH_PORT must be a port number from 1 to 65535." ;;
+esac
+
+[ "$SSH_PORT" -ge 1 ] 2>/dev/null && [ "$SSH_PORT" -le 65535 ] 2>/dev/null || \
+  die "NPC_SSH_PORT must be a port number from 1 to 65535."
 
 OS="$(uname -s 2>/dev/null || echo unknown)"
 ARCH="$(uname -m 2>/dev/null || echo unknown)"
@@ -47,6 +60,7 @@ say "[NPC] Architecture: $ARCH"
 say "[NPC] Package: $PKG"
 say "[NPC] Version: $VERSION"
 say "[NPC] Download: $URL"
+say "[NPC] Local SSH target port: $SSH_PORT"
 
 if command -v curl >/dev/null 2>&1; then
   curl -kfsSL --retry 2 --connect-timeout 15 -o "$ARCHIVE" "$URL"
@@ -163,8 +177,52 @@ if kill -0 "$NPC_PID" 2>/dev/null; then
   say "[NPC] Started successfully in background."
   say "[NPC] PID: $NPC_PID"
   say "[NPC] Server: $SERVER"
+  say "[NPC] Local SSH target: 127.0.0.1:$SSH_PORT"
   say "[NPC] Detach: $DETACH_METHOD"
   say "[NPC] Log: $LOG_FILE"
+
+  if [ "$TIMEOUT" -gt 0 ]; then
+    WATCHDOG_LOG="$INSTALL_DIR/npc-watchdog.log"
+    WATCHDOG_SCRIPT='
+pid=$1
+seconds=$2
+expected=$3
+log_file=$4
+remaining=$seconds
+
+while [ "$remaining" -gt 0 ]; do
+  step=30
+  [ "$remaining" -lt "$step" ] && step=$remaining
+  sleep "$step"
+  kill -0 "$pid" 2>/dev/null || exit 0
+  remaining=$((remaining - step))
+done
+
+if [ -e "/proc/$pid/exe" ] && command -v readlink >/dev/null 2>&1; then
+  current=$(readlink "/proc/$pid/exe" 2>/dev/null || true)
+  [ "$current" = "$expected" ] || exit 0
+fi
+
+printf "%s [NPC] Session timeout reached; stopping PID %s.\n" "$(date 2>/dev/null || true)" "$pid" >>"$log_file"
+kill "$pid" 2>/dev/null || exit 0
+sleep 5
+kill -9 "$pid" 2>/dev/null || true
+'
+
+    if command -v nohup >/dev/null 2>&1; then
+      nohup sh -c "$WATCHDOG_SCRIPT" sh "$NPC_PID" "$TIMEOUT" "$NPC_BIN" "$WATCHDOG_LOG" </dev/null >/dev/null 2>&1 &
+    elif command -v busybox >/dev/null 2>&1 && busybox nohup true >/dev/null 2>&1; then
+      busybox nohup sh -c "$WATCHDOG_SCRIPT" sh "$NPC_PID" "$TIMEOUT" "$NPC_BIN" "$WATCHDOG_LOG" </dev/null >/dev/null 2>&1 &
+    else
+      sh -c "$WATCHDOG_SCRIPT" sh "$NPC_PID" "$TIMEOUT" "$NPC_BIN" "$WATCHDOG_LOG" </dev/null >/dev/null 2>&1 &
+    fi
+
+    say "[NPC] Automatic stop: ${TIMEOUT} seconds"
+    say "[NPC] Watchdog log: $WATCHDOG_LOG"
+  else
+    say "[NPC] Automatic stop: disabled"
+  fi
+
   if command -v tail >/dev/null 2>&1; then
     tail -n 10 "$LOG_FILE" 2>/dev/null || true
   fi
