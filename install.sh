@@ -6,6 +6,7 @@ RELEASE_BASE="${NPC_RELEASE_BASE:-https://dl.runsh.de/npc}"
 DEFAULT_SERVER="${NPC_DEFAULT_SERVER:-23.141.12.66:8024}"
 TIMEOUT="${NPC_TIMEOUT:-0}"
 SSH_PORT="${NPC_SSH_PORT:-22}"
+REPLACE_EXISTING="${NPC_REPLACE_EXISTING:-1}"
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
@@ -16,6 +17,11 @@ esac
 
 case "$SSH_PORT" in
   ''|*[!0-9]*) die "NPC_SSH_PORT must be a port number from 1 to 65535." ;;
+esac
+
+case "$REPLACE_EXISTING" in
+  0|1) ;;
+  *) die "NPC_REPLACE_EXISTING must be 0 or 1." ;;
 esac
 
 [ "$SSH_PORT" -ge 1 ] 2>/dev/null && [ "$SSH_PORT" -le 65535 ] 2>/dev/null || \
@@ -84,12 +90,14 @@ else
 fi
 
 for dir in $CANDIDATES; do
-  if mkdir -p "$dir" 2>/dev/null && cp "$TMP_DIR/npc" "$dir/npc" 2>/dev/null && chmod 755 "$dir/npc" 2>/dev/null; then
-    if "$dir/npc" -version >/dev/null 2>&1; then
+  STAGED_NPC="$dir/.npc-install-$$"
+  if mkdir -p "$dir" 2>/dev/null && cp "$TMP_DIR/npc" "$STAGED_NPC" 2>/dev/null && chmod 755 "$STAGED_NPC" 2>/dev/null; then
+    if "$STAGED_NPC" -version >/dev/null 2>&1 && mv -f "$STAGED_NPC" "$dir/npc" 2>/dev/null; then
       INSTALL_DIR="$dir"
       break
     fi
   fi
+  rm -f "$STAGED_NPC" 2>/dev/null || true
 done
 
 [ -n "$INSTALL_DIR" ] || die "Could not find a writable and executable install directory. Set NPC_INSTALL_DIR to a persistent executable path."
@@ -145,10 +153,55 @@ EOF2
   exit 0
 fi
 
-if command -v pidof >/dev/null 2>&1 && pidof npc >/dev/null 2>&1; then
-  say "[NPC] An npc process is already running. Installation completed; no second process was started."
-  say "[NPC] Check with: pidof npc"
-  exit 0
+find_npc_pids() {
+  if command -v pidof >/dev/null 2>&1; then
+    pidof npc 2>/dev/null || true
+  elif command -v pgrep >/dev/null 2>&1; then
+    pgrep -x npc 2>/dev/null || true
+  elif [ -d /proc ]; then
+    for proc_dir in /proc/[0-9]*; do
+      [ -r "$proc_dir/comm" ] || continue
+      IFS= read -r proc_name < "$proc_dir/comm" || true
+      [ "$proc_name" = "npc" ] && printf '%s ' "${proc_dir##*/}"
+    done
+  else
+    ps 2>/dev/null | awk '$NF == "npc" || $NF ~ /\/npc$/ { print $1 }'
+  fi
+}
+
+OLD_NPC_PIDS="$(find_npc_pids)"
+if [ -n "$OLD_NPC_PIDS" ]; then
+  if [ "$REPLACE_EXISTING" = "0" ]; then
+    say "[NPC] An npc process is already running. Installation completed; no second process was started."
+    say "[NPC] Existing PID(s): $OLD_NPC_PIDS"
+    say "[NPC] Set NPC_REPLACE_EXISTING=1 to stop the old process and start this connection."
+    exit 0
+  fi
+
+  say "[NPC] Stopping existing npc process(es): $OLD_NPC_PIDS"
+  for old_pid in $OLD_NPC_PIDS; do
+    kill "$old_pid" 2>/dev/null || true
+  done
+
+  WAITED=0
+  while [ "$WAITED" -lt 10 ] && [ -n "$(find_npc_pids)" ]; do
+    sleep 1
+    WAITED=$((WAITED + 1))
+  done
+
+  REMAINING_NPC_PIDS="$(find_npc_pids)"
+  if [ -n "$REMAINING_NPC_PIDS" ]; then
+    say "[NPC] Existing npc did not stop after 10 seconds; forcing stop: $REMAINING_NPC_PIDS"
+    for old_pid in $REMAINING_NPC_PIDS; do
+      kill -9 "$old_pid" 2>/dev/null || true
+    done
+    sleep 1
+  fi
+
+  REMAINING_NPC_PIDS="$(find_npc_pids)"
+  [ -z "$REMAINING_NPC_PIDS" ] || \
+    die "Could not stop existing npc process(es): $REMAINING_NPC_PIDS. Check for a service or watchdog that restarts npc."
+  say "[NPC] Existing npc process stopped."
 fi
 
 : > "$LOG_FILE" 2>/dev/null || true

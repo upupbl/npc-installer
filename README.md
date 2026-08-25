@@ -35,6 +35,7 @@ Supported Linux architectures:
 - mips / mipsle / mips64 / mips64le
 
 The installer extracts in `/tmp`, but runs the final binary from a writable executable directory such as `/usr/local/npc`, `/opt/npc`, `$HOME/.local/npc`, or `$HOME/npc`. This avoids common NAS `/tmp noexec` problems.
+Updates are staged and atomically moved into place so an already-running binary does not cause a `Text file busy` failure or make the install directory change unexpectedly.
 
 NPC is started in the background using `setsid`, `nohup`, or BusyBox `nohup` when available. Logs are written to `npc.log` in the installation directory.
 
@@ -58,7 +59,14 @@ NPC_VKEY
 NPC_TYPE
 NPC_TIMEOUT        # seconds; 0 or unset means no automatic stop
 NPC_SSH_PORT       # local SSH target port; defaults to 22
+NPC_REPLACE_EXISTING # 1 (default) stops an old npc before starting; 0 keeps it running
 ```
+
+When a generated Linux command is run again, the installer replaces an existing
+`npc` connection by default. It sends `TERM`, waits up to 10 seconds, and only
+then uses `KILL` if necessary. If a service or another watchdog immediately
+restarts the old process, the installer stops with an error instead of launching
+a second client. Set `NPC_REPLACE_EXISTING=0` to retain the old connection.
 
 Temporary four-hour session using a non-default local SSH port:
 
