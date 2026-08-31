@@ -1,6 +1,6 @@
 # NPS NPC Auto Installer
 
-Automatically detects the platform/architecture, downloads NPS v0.26.10 NPC, installs it, asks for NPS connection information, and starts NPC in the background.
+Automatically detects the platform/architecture, downloads NPS v0.26.10 NPC, installs it, asks for NPS connection information, and starts NPC in the background. Linux/NAS, macOS, and Windows clients are supported.
 
 ## Linux / NAS
 
@@ -73,6 +73,27 @@ Temporary four-hour session using a non-default local SSH port:
 ```sh
 NPC_SERVER='23.141.12.66:8024' NPC_VKEY='YOUR_VKEY' NPC_TIMEOUT='14400' NPC_SSH_PORT='2222' sh -c "$(curl -kfsSL https://dl.runsh.de/npc/install.sh)"
 ```
+
+## macOS
+
+Enable **System Settings > General > Sharing > Remote Login** first, then run the same POSIX shell installer:
+
+```sh
+NPC_SERVER='23.141.12.66:8024' NPC_VKEY='YOUR_VKEY' NPC_TIMEOUT='14400' NPC_SSH_PORT='22' sh -c "$(curl -kfsSL https://dl.runsh.de/npc/install.sh)"
+```
+
+Supported macOS configurations:
+
+- Intel Mac (`x86_64`) -> `darwin_amd64_client.tar.gz`
+- Apple Silicon (`arm64`) -> the same Intel package through Rosetta 2
+
+NPS v0.26.10 does not publish a native Darwin arm64 client. On Apple Silicon,
+the installer verifies Rosetta 2 before downloading NPC and prints the official
+`softwareupdate --install-rosetta --agree-to-license` command when it is missing.
+The installer also verifies that the configured local SSH port is accepting
+connections before it starts NPC.
+If the default `dl.runsh.de` mirror does not contain the Darwin archive, the
+installer automatically falls back to the official `ehang-io/nps` GitHub Release.
 
 ## Windows
 
@@ -172,13 +193,14 @@ Examples:
 https://dl.runsh.de/npc/v0.26.10/linux_amd64_client.tar.gz
 https://dl.runsh.de/npc/v0.26.10/linux_arm64_client.tar.gz
 https://dl.runsh.de/npc/v0.26.10/linux_arm_v7_client.tar.gz
+https://dl.runsh.de/npc/v0.26.10/darwin_amd64_client.tar.gz
 https://dl.runsh.de/npc/v0.26.10/windows_amd64_client.tar.gz
 https://dl.runsh.de/npc/v0.26.10/windows_386_client.tar.gz
 ```
 
 You can temporarily override the mirror without editing the scripts.
 
-Linux example:
+Linux/macOS example:
 
 ```sh
 NPC_RELEASE_BASE='https://another.example.com/npc' sh -c "$(curl -kfsSL https://dl.runsh.de/npc/install.sh)"

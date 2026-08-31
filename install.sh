@@ -31,22 +31,43 @@ OS="$(uname -s 2>/dev/null || echo unknown)"
 ARCH="$(uname -m 2>/dev/null || echo unknown)"
 
 case "$OS" in
-  Linux) ;;
-  *) die "This installer currently supports Linux/NAS. Detected OS: $OS" ;;
-esac
+  Linux)
+    case "$ARCH" in
+      x86_64|amd64)            PKG="linux_amd64_client.tar.gz" ;;
+      i386|i486|i586|i686|x86) PKG="linux_386_client.tar.gz" ;;
+      aarch64|arm64)           PKG="linux_arm64_client.tar.gz" ;;
+      armv7l|armv7*)           PKG="linux_arm_v7_client.tar.gz" ;;
+      armv6l|armv6*)           PKG="linux_arm_v6_client.tar.gz" ;;
+      armv5l|armv5*)           PKG="linux_arm_v5_client.tar.gz" ;;
+      mips64el|mips64le)       PKG="linux_mips64le_client.tar.gz" ;;
+      mips64)                  PKG="linux_mips64_client.tar.gz" ;;
+      mipsel|mipsle)           PKG="linux_mipsle_client.tar.gz" ;;
+      mips)                    PKG="linux_mips_client.tar.gz" ;;
+      *) die "Unsupported Linux architecture: $ARCH" ;;
+    esac
+    ;;
+  Darwin)
+    case "$ARCH" in
+      x86_64|amd64)
+        PKG="darwin_amd64_client.tar.gz"
+        ;;
+      arm64|aarch64)
+        if ! /usr/bin/arch -x86_64 /usr/bin/true >/dev/null 2>&1; then
+          die "Apple Silicon requires Rosetta 2 for NPS v$VERSION. Install it with: softwareupdate --install-rosetta --agree-to-license"
+        fi
+        say "[NPC] Apple Silicon detected; the Intel NPC binary will run through Rosetta 2."
+        PKG="darwin_amd64_client.tar.gz"
+        ;;
+      *) die "Unsupported macOS architecture: $ARCH" ;;
+    esac
 
-case "$ARCH" in
-  x86_64|amd64)            PKG="linux_amd64_client.tar.gz" ;;
-  i386|i486|i586|i686|x86) PKG="linux_386_client.tar.gz" ;;
-  aarch64|arm64)           PKG="linux_arm64_client.tar.gz" ;;
-  armv7l|armv7*)           PKG="linux_arm_v7_client.tar.gz" ;;
-  armv6l|armv6*)           PKG="linux_arm_v6_client.tar.gz" ;;
-  armv5l|armv5*)           PKG="linux_arm_v5_client.tar.gz" ;;
-  mips64el|mips64le)       PKG="linux_mips64le_client.tar.gz" ;;
-  mips64)                  PKG="linux_mips64_client.tar.gz" ;;
-  mipsel|mipsle)           PKG="linux_mipsle_client.tar.gz" ;;
-  mips)                    PKG="linux_mips_client.tar.gz" ;;
-  *) die "Unsupported architecture: $ARCH" ;;
+    if command -v nc >/dev/null 2>&1 &&
+       ! nc -z 127.0.0.1 "$SSH_PORT" >/dev/null 2>&1 &&
+       ! nc -z ::1 "$SSH_PORT" >/dev/null 2>&1; then
+      die "No SSH server is listening on local port $SSH_PORT. Enable System Settings > General > Sharing > Remote Login, or set NPC_SSH_PORT to the actual SSH port."
+    fi
+    ;;
+  *) die "This installer supports Linux/NAS and macOS. Detected OS: $OS" ;;
 esac
 
 IS_ROOT=0
@@ -69,9 +90,25 @@ say "[NPC] Download: $URL"
 say "[NPC] Local SSH target port: $SSH_PORT"
 
 if command -v curl >/dev/null 2>&1; then
-  curl -kfsSL --retry 2 --connect-timeout 15 -o "$ARCHIVE" "$URL"
+  if ! curl -kfsSL --retry 2 --connect-timeout 15 -o "$ARCHIVE" "$URL"; then
+    if [ "$OS" = "Darwin" ] && [ -z "${NPC_RELEASE_BASE:-}" ]; then
+      URL="https://github.com/ehang-io/nps/releases/download/v$VERSION/$PKG"
+      say "[NPC] Package is unavailable from the mirror; falling back to: $URL"
+      curl -fsSL --retry 2 --connect-timeout 15 -o "$ARCHIVE" "$URL"
+    else
+      die "Failed to download $URL"
+    fi
+  fi
 elif command -v wget >/dev/null 2>&1; then
-  wget --no-check-certificate -O "$ARCHIVE" "$URL"
+  if ! wget --no-check-certificate -O "$ARCHIVE" "$URL"; then
+    if [ "$OS" = "Darwin" ] && [ -z "${NPC_RELEASE_BASE:-}" ]; then
+      URL="https://github.com/ehang-io/nps/releases/download/v$VERSION/$PKG"
+      say "[NPC] Package is unavailable from the mirror; falling back to: $URL"
+      wget -O "$ARCHIVE" "$URL"
+    else
+      die "Failed to download $URL"
+    fi
+  fi
 else
   die "curl or wget is required"
 fi
