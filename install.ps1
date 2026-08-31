@@ -31,6 +31,46 @@ function Test-IsAdministrator {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+function Get-NpcWindowsArchitecture {
+    param([switch]$UseLegacyDetection)
+
+    $architectureName = $null
+
+    if (-not $UseLegacyDetection) {
+        try {
+            $runtimeArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+            if ($null -ne $runtimeArchitecture) {
+                $architectureName = $runtimeArchitecture.ToString()
+            }
+        }
+        catch {
+            $architectureName = $null
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($architectureName)) {
+        $architectureName = if ($env:PROCESSOR_ARCHITEW6432) {
+            $env:PROCESSOR_ARCHITEW6432
+        }
+        elseif ($env:PROCESSOR_ARCHITECTURE) {
+            $env:PROCESSOR_ARCHITECTURE
+        }
+        elseif ([Environment]::Is64BitOperatingSystem) {
+            'AMD64'
+        }
+        else {
+            'x86'
+        }
+    }
+
+    switch ($architectureName.Trim().ToUpperInvariant()) {
+        'X64' { return 'X64' }
+        'AMD64' { return 'X64' }
+        'X86' { return 'X86' }
+        default { return $architectureName }
+    }
+}
+
 function Ensure-SshFirewallRule {
     param([Parameter(Mandatory = $true)][int]$Port)
 
@@ -194,7 +234,7 @@ if ($InstallSsh -and -not (Test-IsAdministrator)) {
     throw 'This installer now installs OpenSSH Server by default and must be run from an Administrator PowerShell window. Set NPC_INSTALL_SSH=0 if SSH is not needed.'
 }
 
-$arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+$arch = Get-NpcWindowsArchitecture
 switch ($arch) {
     'X64' { $pkg = 'windows_amd64_client.tar.gz' }
     'X86' { $pkg = 'windows_386_client.tar.gz' }

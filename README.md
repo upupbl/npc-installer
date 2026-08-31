@@ -120,6 +120,10 @@ Supported Windows NPC architectures:
 - 64-bit x86 -> windows_amd64_client.tar.gz
 - 32-bit x86 -> windows_386_client.tar.gz
 
+Architecture detection uses `RuntimeInformation.OSArchitecture` when available
+and automatically falls back to legacy Windows environment/runtime checks on
+older Windows PowerShell and .NET Framework installations.
+
 The default bundled OpenSSH download is the Win64 package. On 32-bit Windows, either provide a compatible SSH ZIP with `NPC_SSH_ZIP_URL` or skip SSH installation.
 
 ### Skip OpenSSH installation
