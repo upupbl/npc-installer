@@ -54,6 +54,7 @@ Optional variables:
 ```text
 NPC_VERSION
 NPC_RELEASE_BASE
+NPC_RELEASE_FALLBACK_BASE # used after the primary mirror fails
 NPC_INSTALL_DIR
 NPC_DEFAULT_SERVER
 NPC_SERVER
@@ -110,6 +111,7 @@ The Windows installer now also installs and configures OpenSSH Server by default
 
 - skip the OpenSSH package download if the `sshd` service already exists;
 - otherwise download `https://dl.runsh.de/ssh/OpenSSH-Win64.zip`;
+- fall back to `https://dl2.runsh.de/ssh/OpenSSH-Win64.zip` if the primary download fails;
 - install OpenSSH under `C:\OpenSSH-Win64`;
 - set `sshd` to start automatically;
 - start the `sshd` service;
@@ -177,6 +179,7 @@ Windows-specific optional variables:
 ```text
 NPC_INSTALL_SSH
 NPC_SSH_ZIP_URL
+NPC_SSH_ZIP_FALLBACK_URL
 NPC_SSH_INSTALL_DIR
 NPC_TIMEOUT
 NPC_SSH_PORT
@@ -190,6 +193,16 @@ The default package source is:
 ```text
 https://dl.runsh.de/npc
 ```
+
+If that source cannot be downloaded, the default fallback is:
+
+```text
+https://dl2.runsh.de/npc
+```
+
+The primary URL is always attempted first. An explicitly supplied
+`NPC_RELEASE_BASE` disables the default fallback unless
+`NPC_RELEASE_FALLBACK_BASE` is also supplied.
 
 The installer builds package URLs as:
 

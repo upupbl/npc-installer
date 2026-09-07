@@ -2,7 +2,14 @@
 set -eu
 
 VERSION="${NPC_VERSION:-0.26.10}"
-RELEASE_BASE="${NPC_RELEASE_BASE:-https://dl.runsh.de/npc}"
+if [ -n "${NPC_RELEASE_BASE:-}" ]; then
+  RELEASE_BASE="${NPC_RELEASE_BASE%/}"
+  FALLBACK_RELEASE_BASE="${NPC_RELEASE_FALLBACK_BASE:-}"
+else
+  RELEASE_BASE="https://dl.runsh.de/npc"
+  FALLBACK_RELEASE_BASE="${NPC_RELEASE_FALLBACK_BASE:-https://dl2.runsh.de/npc}"
+fi
+FALLBACK_RELEASE_BASE="${FALLBACK_RELEASE_BASE%/}"
 DEFAULT_SERVER="${NPC_DEFAULT_SERVER:-23.141.12.66:8024}"
 TIMEOUT="${NPC_TIMEOUT:-0}"
 SSH_PORT="${NPC_SSH_PORT:-22}"
@@ -83,6 +90,8 @@ TMP_BASE="${TMPDIR:-/tmp}"
 TMP_DIR="$TMP_BASE/npc-install-$$"
 ARCHIVE="$TMP_DIR/$PKG"
 URL="$RELEASE_BASE/v$VERSION/$PKG"
+FALLBACK_URL=""
+[ -n "$FALLBACK_RELEASE_BASE" ] && FALLBACK_URL="$FALLBACK_RELEASE_BASE/v$VERSION/$PKG"
 
 cleanup() { rm -rf "$TMP_DIR" 2>/dev/null || true; }
 trap cleanup EXIT INT TERM
@@ -95,28 +104,39 @@ say "[NPC] Version: $VERSION"
 say "[NPC] Download: $URL"
 say "[NPC] Local SSH target port: $SSH_PORT"
 
-if command -v curl >/dev/null 2>&1; then
-  if ! curl -kfsSL --retry 2 --connect-timeout 15 -o "$ARCHIVE" "$URL"; then
-    if [ "$OS" = "Darwin" ] && [ -z "${NPC_RELEASE_BASE:-}" ]; then
-      URL="https://github.com/ehang-io/nps/releases/download/v$VERSION/$PKG"
-      say "[NPC] Package is unavailable from the mirror; falling back to: $URL"
-      curl -fsSL --retry 2 --connect-timeout 15 -o "$ARCHIVE" "$URL"
-    else
-      die "Failed to download $URL"
-    fi
+download_package() {
+  if command -v curl >/dev/null 2>&1; then
+    curl -kfsSL --retry 2 --connect-timeout 15 -o "$ARCHIVE" "$1"
+  elif command -v wget >/dev/null 2>&1; then
+    wget --no-check-certificate -O "$ARCHIVE" "$1"
+  else
+    return 127
   fi
-elif command -v wget >/dev/null 2>&1; then
-  if ! wget --no-check-certificate -O "$ARCHIVE" "$URL"; then
-    if [ "$OS" = "Darwin" ] && [ -z "${NPC_RELEASE_BASE:-}" ]; then
-      URL="https://github.com/ehang-io/nps/releases/download/v$VERSION/$PKG"
-      say "[NPC] Package is unavailable from the mirror; falling back to: $URL"
-      wget -O "$ARCHIVE" "$URL"
-    else
-      die "Failed to download $URL"
-    fi
-  fi
-else
+}
+
+if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
   die "curl or wget is required"
+fi
+
+if ! download_package "$URL"; then
+  rm -f "$ARCHIVE"
+  if [ -n "$FALLBACK_URL" ] && [ "$FALLBACK_URL" != "$URL" ]; then
+    URL="$FALLBACK_URL"
+    say "[NPC] Primary mirror failed; falling back to: $URL"
+  else
+    URL=""
+  fi
+
+  if [ -z "$URL" ] || ! download_package "$URL"; then
+    rm -f "$ARCHIVE"
+    if [ "$OS" = "Darwin" ] && [ -z "${NPC_RELEASE_BASE:-}" ]; then
+      URL="https://github.com/ehang-io/nps/releases/download/v$VERSION/$PKG"
+      say "[NPC] Mirrors are unavailable; falling back to: $URL"
+      download_package "$URL" || die "Failed to download $URL"
+    else
+      die "Failed to download the NPC package from the configured mirrors."
+    fi
+  fi
 fi
 
 command -v tar >/dev/null 2>&1 || die "tar is required"

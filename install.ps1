@@ -2,6 +2,7 @@ $ErrorActionPreference = 'Stop'
 
 $Version = if ($env:NPC_VERSION) { $env:NPC_VERSION } else { '0.26.10' }
 $ReleaseBase = if ($env:NPC_RELEASE_BASE) { $env:NPC_RELEASE_BASE.TrimEnd('/') } else { 'https://dl.runsh.de/npc' }
+$FallbackReleaseBase = if ($env:NPC_RELEASE_FALLBACK_BASE) { $env:NPC_RELEASE_FALLBACK_BASE.TrimEnd('/') } elseif ($env:NPC_RELEASE_BASE) { '' } else { 'https://dl2.runsh.de/npc' }
 $InstallDir = if ($env:NPC_INSTALL_DIR) { $env:NPC_INSTALL_DIR } else { 'C:\npc' }
 $DefaultServer = if ($env:NPC_DEFAULT_SERVER) { $env:NPC_DEFAULT_SERVER } else { '23.141.12.66:8024' }
 $Autostart = -not ($env:NPC_AUTOSTART -match '^(0|false|no|off)$')
@@ -24,6 +25,7 @@ if ($env:NPC_SSH_PORT) {
 # Set NPC_INSTALL_SSH=0 to skip it.
 $InstallSsh = -not ($env:NPC_INSTALL_SSH -match '^(0|false|no|off)$')
 $SshZipUrl = if ($env:NPC_SSH_ZIP_URL) { $env:NPC_SSH_ZIP_URL } else { 'https://dl.runsh.de/ssh/OpenSSH-Win64.zip' }
+$SshZipFallbackUrl = if ($env:NPC_SSH_ZIP_FALLBACK_URL) { $env:NPC_SSH_ZIP_FALLBACK_URL } elseif ($env:NPC_SSH_ZIP_URL) { '' } else { 'https://dl2.runsh.de/ssh/OpenSSH-Win64.zip' }
 $SshInstallDir = if ($env:NPC_SSH_INSTALL_DIR) { $env:NPC_SSH_INSTALL_DIR } else { 'C:\OpenSSH-Win64' }
 
 function Test-IsAdministrator {
@@ -34,6 +36,26 @@ function Test-IsAdministrator {
 
 function Get-UnixTimeSeconds {
     return [long]([DateTimeOffset]::UtcNow - [DateTimeOffset]'1970-01-01T00:00:00Z').TotalSeconds
+}
+
+function Invoke-DownloadWithFallback {
+    param(
+        [Parameter(Mandatory = $true)][string]$PrimaryUrl,
+        [string]$FallbackUrl,
+        [Parameter(Mandatory = $true)][string]$OutFile,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    try {
+        Write-Host "[$Label] Download: $PrimaryUrl"
+        Invoke-WebRequest -UseBasicParsing -Uri $PrimaryUrl -OutFile $OutFile
+    }
+    catch {
+        Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
+        if ([string]::IsNullOrWhiteSpace($FallbackUrl) -or $FallbackUrl -eq $PrimaryUrl) { throw }
+        Write-Host "[$Label] Primary download failed; falling back to: $FallbackUrl"
+        Invoke-WebRequest -UseBasicParsing -Uri $FallbackUrl -OutFile $OutFile
+    }
 }
 
 function Get-NpcWindowsArchitecture {
@@ -181,10 +203,8 @@ function Install-OpenSshServer {
 
         try {
             Write-Host '[SSH] sshd service not found. Installing OpenSSH Server...'
-            Write-Host "[SSH] Download: $SshZipUrl"
-
             [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-            Invoke-WebRequest -UseBasicParsing -Uri $SshZipUrl -OutFile $sshArchive
+            Invoke-DownloadWithFallback -PrimaryUrl $SshZipUrl -FallbackUrl $SshZipFallbackUrl -OutFile $sshArchive -Label 'SSH'
 
             Write-Host '[SSH] Extracting package...'
             Expand-Archive -Path $sshArchive -DestinationPath $sshExtract -Force
@@ -335,6 +355,7 @@ switch ($arch) {
 }
 
 $url = "$ReleaseBase/v$Version/$pkg"
+$fallbackUrl = if ($FallbackReleaseBase) { "$FallbackReleaseBase/v$Version/$pkg" } else { '' }
 $tmp = Join-Path $env:TEMP ("npc-install-" + [guid]::NewGuid().ToString('N'))
 $archive = Join-Path $tmp $pkg
 
@@ -345,10 +366,8 @@ try {
     Write-Host "[NPC] Windows architecture: $arch"
     Write-Host "[NPC] Package: $pkg"
     Write-Host "[NPC] Version: $Version"
-    Write-Host "[NPC] Download: $url"
-
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $archive
+    Invoke-DownloadWithFallback -PrimaryUrl $url -FallbackUrl $fallbackUrl -OutFile $archive -Label 'NPC'
 
     $tar = Get-Command tar.exe -ErrorAction SilentlyContinue
     if (-not $tar) { throw 'tar.exe is required. Use Windows 10/11 or install tar/7-Zip and extract manually.' }
