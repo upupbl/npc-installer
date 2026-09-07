@@ -4,6 +4,7 @@ $Version = if ($env:NPC_VERSION) { $env:NPC_VERSION } else { '0.26.10' }
 $ReleaseBase = if ($env:NPC_RELEASE_BASE) { $env:NPC_RELEASE_BASE.TrimEnd('/') } else { 'https://dl.runsh.de/npc' }
 $InstallDir = if ($env:NPC_INSTALL_DIR) { $env:NPC_INSTALL_DIR } else { 'C:\npc' }
 $DefaultServer = if ($env:NPC_DEFAULT_SERVER) { $env:NPC_DEFAULT_SERVER } else { '23.141.12.66:8024' }
+$Autostart = -not ($env:NPC_AUTOSTART -match '^(0|false|no|off)$')
 
 $TimeoutSeconds = 0
 if ($env:NPC_TIMEOUT) {
@@ -29,6 +30,10 @@ function Test-IsAdministrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = New-Object Security.Principal.WindowsPrincipal($identity)
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Get-UnixTimeSeconds {
+    return [long]([DateTimeOffset]::UtcNow - [DateTimeOffset]'1970-01-01T00:00:00Z').TotalSeconds
 }
 
 function Get-NpcWindowsArchitecture {
@@ -230,8 +235,96 @@ function Install-OpenSshServer {
     Write-Host '[SSH] Startup type: Automatic'
 }
 
-if ($InstallSsh -and -not (Test-IsAdministrator)) {
-    throw 'This installer now installs OpenSSH Server by default and must be run from an Administrator PowerShell window. Set NPC_INSTALL_SSH=0 if SSH is not needed.'
+function Install-NpcStartupTask {
+    param(
+        [Parameter(Mandatory = $true)][string]$NpcPath,
+        [Parameter(Mandatory = $true)][string]$Server,
+        [Parameter(Mandatory = $true)][string]$VKey,
+        [Parameter(Mandatory = $true)][string]$Type,
+        [Parameter(Mandatory = $true)][int]$TimeoutSeconds,
+        [Parameter(Mandatory = $true)][string]$InstallDir
+    )
+
+    if (-not (Test-IsAdministrator)) {
+        throw 'Administrator privileges are required to enable NPC startup.'
+    }
+
+    $expiresAt = if ($TimeoutSeconds -gt 0) {
+        (Get-UnixTimeSeconds) + $TimeoutSeconds
+    }
+    else { 0 }
+    $configPath = Join-Path $InstallDir 'npc-startup.json'
+    $runnerPath = Join-Path $InstallDir 'npc-startup.ps1'
+    $logOut = Join-Path $InstallDir 'npc.log'
+    $logErr = Join-Path $InstallDir 'npc-error.log'
+
+    & icacls.exe $InstallDir /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)(F)' '*S-1-5-32-544:(OI)(CI)(F)' /T /C | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Could not restrict access to $InstallDir" }
+
+    [ordered]@{
+        NpcPath = $NpcPath
+        Server = $Server
+        VKey = $VKey
+        Type = $Type
+        ExpiresAtUnix = $expiresAt
+        LogOut = $logOut
+        LogErr = $logErr
+    } | ConvertTo-Json | Set-Content -Path $configPath -Encoding UTF8
+
+    $runnerContent = @'
+$ErrorActionPreference = 'Stop'
+$configPath = Join-Path $PSScriptRoot 'npc-startup.json'
+$config = Get-Content -Raw -Path $configPath | ConvertFrom-Json
+$now = [long]([DateTimeOffset]::UtcNow - [DateTimeOffset]'1970-01-01T00:00:00Z').TotalSeconds
+$expiresAt = [long]$config.ExpiresAtUnix
+if ($expiresAt -gt 0 -and $now -ge $expiresAt) { exit 0 }
+
+$arguments = @("-server=$($config.Server)", "-vkey=$($config.VKey)", "-type=$($config.Type)")
+$process = Start-Process -FilePath $config.NpcPath -ArgumentList $arguments -WindowStyle Hidden -PassThru -RedirectStandardOutput $config.LogOut -RedirectStandardError $config.LogErr
+$timedOut = $false
+if ($expiresAt -gt 0) {
+    $remainingMilliseconds = [int][Math]::Max(1, [Math]::Min([int]::MaxValue, ($expiresAt - $now) * 1000))
+    if (-not $process.WaitForExit($remainingMilliseconds)) {
+        $timedOut = $true
+        Stop-Process -Id $process.Id -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 5
+        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+        $process.WaitForExit()
+    }
+}
+else {
+    $process.WaitForExit()
+}
+if ($timedOut) { exit 0 }
+if ($process.ExitCode -eq 0 -and ($expiresAt -eq 0 -or [long]([DateTimeOffset]::UtcNow - [DateTimeOffset]'1970-01-01T00:00:00Z').TotalSeconds -lt $expiresAt)) { exit 1 }
+exit $process.ExitCode
+'@
+    Set-Content -Path $runnerPath -Value $runnerContent -Encoding UTF8
+
+    $taskName = 'NPS NPC Client'
+    $powerShellArguments = "-NoProfile -ExecutionPolicy Bypass -File `"$runnerPath`""
+    if (Get-Command Register-ScheduledTask -ErrorAction SilentlyContinue) {
+        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+        $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $powerShellArguments
+        $trigger = New-ScheduledTaskTrigger -AtStartup
+        $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+        $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero)
+        Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings | Out-Null
+        Start-ScheduledTask -TaskName $taskName
+    }
+    else {
+        $taskCommand = "powershell.exe $powerShellArguments"
+        & schtasks.exe /Create /TN $taskName /SC ONSTART /RU SYSTEM /RL HIGHEST /TR $taskCommand /F | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'Could not create the NPC startup task.' }
+        & schtasks.exe /Run /TN $taskName | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'Could not start the NPC startup task.' }
+    }
+
+    return $expiresAt
+}
+
+if (($InstallSsh -or $Autostart) -and -not (Test-IsAdministrator)) {
+    throw 'Administrator PowerShell is required for OpenSSH installation or NPC startup. Set NPC_INSTALL_SSH=0 and NPC_AUTOSTART=0 only if both features are not needed.'
 }
 
 $arch = Get-NpcWindowsArchitecture
@@ -263,6 +356,18 @@ try {
     & tar.exe -xzf $archive -C $tmp
     $npc = Join-Path $tmp 'npc.exe'
     if (-not (Test-Path $npc)) { throw 'npc.exe was not found after extraction.' }
+
+    if ($Autostart) {
+        if (Get-Command Stop-ScheduledTask -ErrorAction SilentlyContinue) {
+            Stop-ScheduledTask -TaskName 'NPS NPC Client' -ErrorAction SilentlyContinue
+        }
+        else {
+            & schtasks.exe /End /TN 'NPS NPC Client' 2>$null | Out-Null
+        }
+        $oldNpcProcesses = @(Get-Process -Name npc -ErrorAction SilentlyContinue)
+        $oldNpcProcesses | Stop-Process -Force -ErrorAction SilentlyContinue
+        $oldNpcProcesses | Wait-Process -Timeout 10 -ErrorAction SilentlyContinue
+    }
 
     Copy-Item $npc (Join-Path $InstallDir 'npc.exe') -Force
     $installed = Join-Path $InstallDir 'npc.exe'
@@ -307,6 +412,28 @@ if ([string]::IsNullOrWhiteSpace($VKey)) {
     Write-Host '[NPC] Installation finished. VKey was not supplied, so NPC was not started.'
     Write-Host 'Run manually:'
     Write-Host "  $installed -server=$Server -vkey=YOUR_VKEY -type=$Type"
+    exit 0
+}
+
+if ($Autostart) {
+    $expiresAt = Install-NpcStartupTask -NpcPath $installed -Server $Server -VKey $VKey -Type $Type -TimeoutSeconds $TimeoutSeconds -InstallDir $InstallDir
+    Start-Sleep -Seconds 2
+    $started = Get-Process -Name npc -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $started -and ($expiresAt -eq 0 -or (Get-UnixTimeSeconds) -lt $expiresAt)) {
+        throw 'The NPC startup task was created, but npc.exe did not remain running. Check npc-error.log and Task Scheduler.'
+    }
+    Write-Host '[NPC] Started by Task Scheduler and enabled at boot.'
+    if ($started) { Write-Host "[NPC] PID: $($started.Id)" }
+    Write-Host '[NPC] Startup task: NPS NPC Client'
+    Write-Host "[NPC] Server: $Server"
+    Write-Host "[NPC] Local SSH target: 127.0.0.1:$SshPort"
+    Write-Host "[NPC] Log: $(Join-Path $InstallDir 'npc.log')"
+    if ($TimeoutSeconds -gt 0) {
+        Write-Host "[NPC] Absolute expiry: $expiresAt (Unix time); reboot does not reset it."
+    }
+    else {
+        Write-Host '[NPC] Automatic stop: disabled'
+    }
     exit 0
 }
 

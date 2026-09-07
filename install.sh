@@ -7,6 +7,7 @@ DEFAULT_SERVER="${NPC_DEFAULT_SERVER:-23.141.12.66:8024}"
 TIMEOUT="${NPC_TIMEOUT:-0}"
 SSH_PORT="${NPC_SSH_PORT:-22}"
 REPLACE_EXISTING="${NPC_REPLACE_EXISTING:-1}"
+AUTOSTART="${NPC_AUTOSTART:-1}"
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
@@ -22,6 +23,11 @@ esac
 case "$REPLACE_EXISTING" in
   0|1) ;;
   *) die "NPC_REPLACE_EXISTING must be 0 or 1." ;;
+esac
+
+case "$AUTOSTART" in
+  0|1) ;;
+  *) die "NPC_AUTOSTART must be 0 or 1." ;;
 esac
 
 [ "$SSH_PORT" -ge 1 ] 2>/dev/null && [ "$SSH_PORT" -le 65535 ] 2>/dev/null || \
@@ -190,6 +196,144 @@ EOF2
   exit 0
 fi
 
+CARRIAGE_RETURN=$(printf '\r')
+case "$SERVER$VKEY$TYPE" in
+  *"$CARRIAGE_RETURN"*) die "NPC connection values must not contain line breaks." ;;
+esac
+[ "$(printf '%s' "$SERVER$VKEY$TYPE" | wc -l | tr -d ' ')" = "0" ] || \
+  die "NPC connection values must not contain line breaks."
+
+NOW_EPOCH="$(date +%s)"
+if [ "$TIMEOUT" -gt 0 ]; then
+  EXPIRES_AT=$((NOW_EPOCH + TIMEOUT))
+else
+  EXPIRES_AT=0
+fi
+
+RUNNER="$INSTALL_DIR/npc-startup.sh"
+STARTUP_CONFIG="$INSTALL_DIR/npc-startup.conf"
+
+stop_managed_startup() {
+  if [ "$OS" = "Linux" ] && [ "$IS_ROOT" = "1" ] && command -v systemctl >/dev/null 2>&1; then
+    systemctl stop npc.service >/dev/null 2>&1 || true
+  elif [ "$OS" = "Darwin" ] && [ "$IS_ROOT" = "1" ] && command -v launchctl >/dev/null 2>&1; then
+    launchctl bootout system/de.runsh.npc >/dev/null 2>&1 || true
+  fi
+}
+
+install_runner() {
+  umask 077
+  {
+    printf '%s\n' "$NPC_BIN"
+    printf '%s\n' "$SERVER"
+    printf '%s\n' "$VKEY"
+    printf '%s\n' "$TYPE"
+    printf '%s\n' "$EXPIRES_AT"
+    printf '%s\n' "$LOG_FILE"
+  } > "$STARTUP_CONFIG"
+
+  cat > "$RUNNER" <<'EOF_RUNNER'
+#!/bin/sh
+set -eu
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+CONFIG="$SCRIPT_DIR/npc-startup.conf"
+[ -r "$CONFIG" ] || exit 1
+NPC_BIN=$(sed -n '1p' "$CONFIG")
+SERVER=$(sed -n '2p' "$CONFIG")
+VKEY=$(sed -n '3p' "$CONFIG")
+TYPE=$(sed -n '4p' "$CONFIG")
+EXPIRES_AT=$(sed -n '5p' "$CONFIG")
+LOG_FILE=$(sed -n '6p' "$CONFIG")
+case "$EXPIRES_AT" in ''|*[!0-9]*) exit 1 ;; esac
+NOW=$(date +%s)
+if [ "$EXPIRES_AT" -gt 0 ] && [ "$NOW" -ge "$EXPIRES_AT" ]; then exit 0; fi
+
+"$NPC_BIN" -server="$SERVER" -vkey="$VKEY" -type="$TYPE" </dev/null >>"$LOG_FILE" 2>&1 &
+NPC_PID=$!
+TIMER_PID=
+cleanup() {
+  [ -z "$TIMER_PID" ] || kill "$TIMER_PID" 2>/dev/null || true
+  kill "$NPC_PID" 2>/dev/null || true
+}
+trap cleanup INT TERM EXIT
+if [ "$EXPIRES_AT" -gt 0 ]; then
+  REMAINING=$((EXPIRES_AT - NOW))
+  ( sleep "$REMAINING"; kill "$NPC_PID" 2>/dev/null || exit 0; sleep 5; kill -9 "$NPC_PID" 2>/dev/null || true ) &
+  TIMER_PID=$!
+fi
+set +e
+wait "$NPC_PID"
+STATUS=$?
+set -e
+trap - INT TERM EXIT
+[ -z "$TIMER_PID" ] || kill "$TIMER_PID" 2>/dev/null || true
+NOW=$(date +%s)
+if [ "$EXPIRES_AT" -gt 0 ] && [ "$NOW" -ge "$EXPIRES_AT" ]; then exit 0; fi
+[ "$STATUS" -ne 0 ] || STATUS=1
+exit "$STATUS"
+EOF_RUNNER
+  chmod 700 "$RUNNER"
+}
+
+enable_managed_startup() {
+  [ "$AUTOSTART" = "1" ] || return 1
+  [ "$IS_ROOT" = "1" ] || return 1
+  case "$RUNNER" in *[!A-Za-z0-9_./-]*) return 1 ;; esac
+  install_runner
+
+  if [ "$OS" = "Linux" ] && command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+    cat > /etc/systemd/system/npc.service <<EOF_SERVICE
+[Unit]
+Description=NPS NPC client
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=$RUNNER
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF_SERVICE
+    chmod 644 /etc/systemd/system/npc.service
+    systemctl daemon-reload
+    systemctl enable npc.service >/dev/null
+    systemctl start npc.service
+    sleep 2
+    systemctl is-active --quiet npc.service || die "npc.service failed to start. Run: systemctl status npc.service"
+    say "[NPC] Started as systemd service and enabled at boot."
+    say "[NPC] Service: npc.service"
+    return 0
+  fi
+
+  if [ "$OS" = "Darwin" ] && command -v launchctl >/dev/null 2>&1; then
+    PLIST=/Library/LaunchDaemons/de.runsh.npc.plist
+    cat > "$PLIST" <<EOF_PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>de.runsh.npc</string>
+<key>ProgramArguments</key><array><string>$RUNNER</string></array>
+<key>RunAtLoad</key><true/>
+<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+<key>ProcessType</key><string>Background</string>
+</dict></plist>
+EOF_PLIST
+    chmod 600 "$PLIST"
+    launchctl bootstrap system "$PLIST"
+    launchctl enable system/de.runsh.npc >/dev/null 2>&1 || true
+    launchctl kickstart -k system/de.runsh.npc
+    sleep 2
+    launchctl print system/de.runsh.npc >/dev/null 2>&1 || die "launchd job failed to load."
+    say "[NPC] Started as a launchd daemon and enabled at boot."
+    say "[NPC] Service: de.runsh.npc"
+    return 0
+  fi
+  return 1
+}
+
 find_npc_pids() {
   if command -v pidof >/dev/null 2>&1; then
     pidof npc 2>/dev/null || true
@@ -206,6 +350,7 @@ find_npc_pids() {
   fi
 }
 
+if [ "$REPLACE_EXISTING" = "1" ]; then stop_managed_startup; fi
 OLD_NPC_PIDS="$(find_npc_pids)"
 if [ -n "$OLD_NPC_PIDS" ]; then
   if [ "$REPLACE_EXISTING" = "0" ]; then
@@ -239,6 +384,22 @@ if [ -n "$OLD_NPC_PIDS" ]; then
   [ -z "$REMAINING_NPC_PIDS" ] || \
     die "Could not stop existing npc process(es): $REMAINING_NPC_PIDS. Check for a service or watchdog that restarts npc."
   say "[NPC] Existing npc process stopped."
+fi
+
+if enable_managed_startup; then
+  say "[NPC] Server: $SERVER"
+  say "[NPC] Local SSH target: 127.0.0.1:$SSH_PORT"
+  say "[NPC] Log: $LOG_FILE"
+  if [ "$TIMEOUT" -gt 0 ]; then
+    say "[NPC] Absolute expiry: $EXPIRES_AT (Unix time); reboot does not reset it."
+  else
+    say "[NPC] Automatic stop: disabled"
+  fi
+  exit 0
+fi
+
+if [ "$AUTOSTART" = "1" ]; then
+  say "[NPC] Boot startup was not enabled because root and systemd/launchd are required; using background mode."
 fi
 
 : > "$LOG_FILE" 2>/dev/null || true

@@ -37,7 +37,9 @@ Supported Linux architectures:
 The installer extracts in `/tmp`, but runs the final binary from a writable executable directory such as `/usr/local/npc`, `/opt/npc`, `$HOME/.local/npc`, or `$HOME/npc`. This avoids common NAS `/tmp noexec` problems.
 Updates are staged and atomically moved into place so an already-running binary does not cause a `Text file busy` failure or make the install directory change unexpectedly.
 
-NPC is started in the background using `setsid`, `nohup`, or BusyBox `nohup` when available. Logs are written to `npc.log` in the installation directory.
+When run as root on a systemd host, the installer creates and enables `npc.service`. On macOS, running as root creates the `de.runsh.npc` LaunchDaemon. The saved startup configuration is readable only by root. If root or the native service manager is unavailable, NPC falls back to the previous detached background mode and prints a warning. Logs are written to `npc.log` in the installation directory.
+
+Temporary sessions save an absolute expiry time. Restarting the computer resumes a still-valid connection but does not reset or extend its lifetime.
 
 ### Linux non-interactive mode
 
@@ -60,6 +62,7 @@ NPC_TYPE
 NPC_TIMEOUT        # seconds; 0 or unset means no automatic stop
 NPC_SSH_PORT       # local SSH target port; defaults to 22
 NPC_REPLACE_EXISTING # 1 (default) stops an old npc before starting; 0 keeps it running
+NPC_AUTOSTART       # 1 (default) enables native boot startup; 0 uses background mode
 ```
 
 When a generated Linux command is run again, the installer replaces an existing
@@ -68,10 +71,10 @@ then uses `KILL` if necessary. If a service or another watchdog immediately
 restarts the old process, the installer stops with an error instead of launching
 a second client. Set `NPC_REPLACE_EXISTING=0` to retain the old connection.
 
-Temporary four-hour session using a non-default local SSH port:
+Temporary 24-hour session using a non-default local SSH port:
 
 ```sh
-NPC_SERVER='23.141.12.66:8024' NPC_VKEY='YOUR_VKEY' NPC_TIMEOUT='14400' NPC_SSH_PORT='2222' sh -c "$(curl -kfsSL https://dl.runsh.de/npc/install.sh)"
+NPC_SERVER='23.141.12.66:8024' NPC_VKEY='YOUR_VKEY' NPC_TIMEOUT='86400' NPC_SSH_PORT='2222' sh -c "$(curl -kfsSL https://dl.runsh.de/npc/install.sh)"
 ```
 
 ## macOS
@@ -79,7 +82,7 @@ NPC_SERVER='23.141.12.66:8024' NPC_VKEY='YOUR_VKEY' NPC_TIMEOUT='14400' NPC_SSH_
 Enable **System Settings > General > Sharing > Remote Login** first, then run the same POSIX shell installer:
 
 ```sh
-NPC_SERVER='23.141.12.66:8024' NPC_VKEY='YOUR_VKEY' NPC_TIMEOUT='14400' NPC_SSH_PORT='22' sh -c "$(curl -kfsSL https://dl.runsh.de/npc/install.sh)"
+NPC_SERVER='23.141.12.66:8024' NPC_VKEY='YOUR_VKEY' NPC_TIMEOUT='86400' NPC_SSH_PORT='22' sh -c "$(curl -kfsSL https://dl.runsh.de/npc/install.sh)"
 ```
 
 Supported macOS configurations:
@@ -111,7 +114,9 @@ The Windows installer now also installs and configures OpenSSH Server by default
 - set `sshd` to start automatically;
 - start the `sshd` service;
 - create/enable a Windows Firewall inbound rule for TCP port 22;
-- then ask for the NPS server and VKey and start `C:\npc\npc.exe` in the background.
+- then ask for the NPS server and VKey, create the `NPS NPC Client` startup task, and run `C:\npc\npc.exe` as `SYSTEM`.
+
+The task stores the connection settings in `C:\npc\npc-startup.json`; the NPC install directory and its contents are restricted to `SYSTEM` and Administrators. Temporary sessions retain their original absolute expiry across reboots.
 
 Because OpenSSH Server installation changes Windows services and firewall settings, the default Windows installer must be run from an Administrator PowerShell window.
 
@@ -148,16 +153,16 @@ You can also override the OpenSSH install directory with `NPC_SSH_INSTALL_DIR`.
 $env:NPC_SERVER='23.141.12.66:8024'; $env:NPC_VKEY='YOUR_VKEY'; irm https://raw.githubusercontent.com/upupbl/npc-installer/main/install.ps1 | iex
 ```
 
-Temporary four-hour session using the detected/default SSH port:
+Temporary 24-hour session using the detected/default SSH port:
 
 ```powershell
-$env:NPC_SERVER='23.141.12.66:8024'; $env:NPC_VKEY='YOUR_VKEY'; $env:NPC_TIMEOUT='14400'; irm https://raw.githubusercontent.com/upupbl/npc-installer/main/install.ps1 | iex
+$env:NPC_SERVER='23.141.12.66:8024'; $env:NPC_VKEY='YOUR_VKEY'; $env:NPC_TIMEOUT='86400'; irm https://raw.githubusercontent.com/upupbl/npc-installer/main/install.ps1 | iex
 ```
 
 If OpenSSH already listens on a non-default port, provide it explicitly. The installer validates the requested port against the running `sshd` service before starting NPC:
 
 ```powershell
-$env:NPC_SERVER='23.141.12.66:8024'; $env:NPC_VKEY='YOUR_VKEY'; $env:NPC_TIMEOUT='14400'; $env:NPC_SSH_PORT='2222'; irm https://raw.githubusercontent.com/upupbl/npc-installer/main/install.ps1 | iex
+$env:NPC_SERVER='23.141.12.66:8024'; $env:NPC_VKEY='YOUR_VKEY'; $env:NPC_TIMEOUT='86400'; $env:NPC_SSH_PORT='2222'; irm https://raw.githubusercontent.com/upupbl/npc-installer/main/install.ps1 | iex
 ```
 
 Logs are written to:
@@ -175,6 +180,7 @@ NPC_SSH_ZIP_URL
 NPC_SSH_INSTALL_DIR
 NPC_TIMEOUT
 NPC_SSH_PORT
+NPC_AUTOSTART
 ```
 
 ## Package mirror
