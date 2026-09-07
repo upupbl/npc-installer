@@ -67,7 +67,7 @@ NPC_AUTOSTART       # 1 (default) enables native boot startup; 0 uses background
 ```
 
 When a generated Linux command is run again, the installer replaces an existing
-`npc` connection by default. It sends `TERM`, waits up to 10 seconds, and only
+`npc` connection by default. It sends `TERM`, waits up to 3 seconds, and only
 then uses `KILL` if necessary. If a service or another watchdog immediately
 restarts the old process, the installer stops with an error instead of launching
 a second client. Set `NPC_REPLACE_EXISTING=0` to retain the old connection.

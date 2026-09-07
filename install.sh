@@ -386,14 +386,14 @@ if [ -n "$OLD_NPC_PIDS" ]; then
   done
 
   WAITED=0
-  while [ "$WAITED" -lt 10 ] && [ -n "$(find_npc_pids)" ]; do
+  while [ "$WAITED" -lt 3 ] && [ -n "$(find_npc_pids)" ]; do
     sleep 1
     WAITED=$((WAITED + 1))
   done
 
   REMAINING_NPC_PIDS="$(find_npc_pids)"
   if [ -n "$REMAINING_NPC_PIDS" ]; then
-    say "[NPC] Existing npc did not stop after 10 seconds; forcing stop: $REMAINING_NPC_PIDS"
+    say "[NPC] Existing npc did not stop after 3 seconds; forcing stop: $REMAINING_NPC_PIDS"
     for old_pid in $REMAINING_NPC_PIDS; do
       kill -9 "$old_pid" 2>/dev/null || true
     done
