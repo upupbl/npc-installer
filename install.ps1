@@ -10,13 +10,19 @@ $ReleaseBase = if ($env:NPC_RELEASE_BASE) { $env:NPC_RELEASE_BASE.TrimEnd('/') }
 $FallbackReleaseBase = if ($env:NPC_RELEASE_FALLBACK_BASE) { $env:NPC_RELEASE_FALLBACK_BASE.TrimEnd('/') } elseif ($env:NPC_RELEASE_BASE) { '' } else { 'https://dl2.runsh.de/npc' }
 $InstallDir = if ($env:NPC_INSTALL_DIR) { $env:NPC_INSTALL_DIR } else { 'C:\npc' }
 $DefaultServer = if ($env:NPC_DEFAULT_SERVER) { $env:NPC_DEFAULT_SERVER } else { '23.141.12.66:8024' }
-$Autostart = -not ($env:NPC_AUTOSTART -match '^(0|false|no|off)$')
+# Windows autostart is not supported and is deliberately not attempted.
+# A task that starts without a login runs in session 0, and npc.exe's service
+# library then decides it is a Windows service, tries to reach the service
+# control manager, fails because nothing started it as a service, and exits
+# immediately without logging anything. npc only runs correctly from an
+# interactive session, so the client has to be started by running this command.
+$Autostart = $false
+if ($env:NPC_AUTOSTART -match '^(1|true|yes|on)$') {
+    Write-Host '[NPC] NPC_AUTOSTART is ignored on Windows; see the note printed at the end.'
+}
 # Any npc process already on this machine is replaced, whatever expiry it carries.
 # Set NPC_REPLACE_EXISTING=0 to keep it, matching the Linux installer.
 $ReplaceExisting = -not ($env:NPC_REPLACE_EXISTING -match '^(0|false|no|off)$')
-# Troubleshooting switch: keep a failed startup install in place for inspection
-# instead of rolling it back. This leaves the vkey on disk, so it is off by default.
-$KeepOnFailure = [bool]($env:NPC_KEEP_ON_FAILURE -match '^(1|true|yes|on)$')
 
 $TimeoutSeconds = 0
 if ($env:NPC_TIMEOUT) {
@@ -43,10 +49,6 @@ function Test-IsAdministrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = New-Object Security.Principal.WindowsPrincipal($identity)
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-}
-
-function Get-UnixTimeSeconds {
-    return [long]([DateTimeOffset]::UtcNow - [DateTimeOffset]'1970-01-01T00:00:00Z').TotalSeconds
 }
 
 function Invoke-DownloadWithFallback {
@@ -224,6 +226,17 @@ function Stop-NpcRuntime {
     }
 
     if ($running.Count -gt 0) { Write-Host '[NPC] Existing npc processes stopped.' }
+
+    # Earlier versions installed a startup task whose config file held the vkey.
+    # The task is removed above; these leftovers are useless now and must not keep
+    # a credential on disk.
+    foreach ($stale in @('npc-startup.json', 'npc-startup.ps1', 'npc-startup.log')) {
+        $stalePath = Join-Path $InstallDir $stale
+        if (Test-Path -LiteralPath $stalePath) {
+            Remove-Item -LiteralPath $stalePath -Force -ErrorAction SilentlyContinue
+            Write-Host "[NPC] Removed leftover $stale from the previous startup task."
+        }
+    }
 }
 
 function Get-NpcWindowsArchitecture {
@@ -423,160 +436,8 @@ function Install-OpenSshServer {
     Write-Host '[SSH] Startup type: Automatic'
 }
 
-function Install-NpcStartupTask {
-    param(
-        [Parameter(Mandatory = $true)][string]$NpcPath,
-        [Parameter(Mandatory = $true)][string]$Server,
-        [Parameter(Mandatory = $true)][string]$VKey,
-        [Parameter(Mandatory = $true)][string]$Type,
-        [Parameter(Mandatory = $true)][int]$TimeoutSeconds,
-        [Parameter(Mandatory = $true)][string]$InstallDir
-    )
-
-    if (-not (Test-IsAdministrator)) {
-        throw 'Administrator privileges are required to enable NPC startup.'
-    }
-
-    $expiresAt = if ($TimeoutSeconds -gt 0) {
-        (Get-UnixTimeSeconds) + $TimeoutSeconds
-    }
-    else { 0 }
-    $configPath = Join-Path $InstallDir 'npc-startup.json'
-    $runnerPath = Join-Path $InstallDir 'npc-startup.ps1'
-    $logOut = Join-Path $InstallDir 'npc.log'
-    $logErr = Join-Path $InstallDir 'npc-error.log'
-
-    # The install directory ACL is applied by Initialize-NpcInstallDir before any
-    # file is written, so the files below inherit it instead of being rewritten.
-
-    # Remove the previous credentials before writing new ones. If any step below
-    # fails, the startup task must not fall back to a stale vkey and reconnect,
-    # which looks like a working install but fails NPS key validation.
-    Remove-Item -LiteralPath $configPath -Force -ErrorAction SilentlyContinue
-    if (Test-Path -LiteralPath $configPath) {
-        throw "Could not remove the previous startup config at $configPath"
-    }
-
-    $configTempPath = "$configPath.new"
-    Remove-Item -LiteralPath $configTempPath -Force -ErrorAction SilentlyContinue
-    [ordered]@{
-        NpcPath = $NpcPath
-        Server = $Server
-        VKey = $VKey
-        Type = $Type
-        ExpiresAtUnix = $expiresAt
-        LogOut = $logOut
-        LogErr = $logErr
-    } | ConvertTo-Json | Set-Content -Path $configTempPath -Encoding UTF8 -ErrorAction Stop
-    Move-Item -LiteralPath $configTempPath -Destination $configPath -Force -ErrorAction Stop
-
-    $writtenConfig = Get-Content -Raw -LiteralPath $configPath -ErrorAction Stop | ConvertFrom-Json
-    if ($writtenConfig.VKey -ne $VKey) {
-        throw "The startup config at $configPath does not hold the vkey from this install."
-    }
-
-    $runnerContent = @'
-$ErrorActionPreference = 'Stop'
-
-# Every early exit below is a silent success as far as Task Scheduler is
-# concerned, so each one records why it happened. Without this the task simply
-# reports 0x0 and leaves no way to tell "nothing to do" from "misconfigured".
-$runnerLog = Join-Path $PSScriptRoot 'npc-startup.log'
-function Write-RunnerLog {
-    param([string]$Message)
-    try {
-        $line = '{0} {1}' -f (Get-Date -Format 'yyyy-MM-ddTHH:mm:sszzz'), $Message
-        Add-Content -LiteralPath $runnerLog -Value $line -ErrorAction Stop
-    }
-    catch { }
-}
-
-Write-RunnerLog "runner started as $([Security.Principal.WindowsIdentity]::GetCurrent().Name)"
-
-$configPath = Join-Path $PSScriptRoot 'npc-startup.json'
-if (-not (Test-Path -LiteralPath $configPath)) {
-    Write-RunnerLog "exit 0: config not found at $configPath"
-    exit 0
-}
-$config = Get-Content -Raw -Path $configPath | ConvertFrom-Json
-if ([string]::IsNullOrWhiteSpace($config.VKey) -or [string]::IsNullOrWhiteSpace($config.Server)) {
-    Write-RunnerLog 'exit 0: config has no Server or VKey'
-    exit 0
-}
-$now = [long]([DateTimeOffset]::UtcNow - [DateTimeOffset]'1970-01-01T00:00:00Z').TotalSeconds
-$expiresAt = [long]$config.ExpiresAtUnix
-if ($expiresAt -gt 0 -and $now -ge $expiresAt) {
-    Write-RunnerLog "exit 0: session already expired (now=$now expiresAt=$expiresAt)"
-    exit 0
-}
-
-if (-not (Test-Path -LiteralPath $config.NpcPath)) {
-    Write-RunnerLog "exit 1: npc binary missing at $($config.NpcPath)"
-    exit 1
-}
-
-Write-RunnerLog "starting $($config.NpcPath) against $($config.Server) (expiresAt=$expiresAt)"
-$arguments = @("-server=$($config.Server)", "-vkey=$($config.VKey)", "-type=$($config.Type)")
-try {
-    $process = Start-Process -FilePath $config.NpcPath -ArgumentList $arguments -WindowStyle Hidden -PassThru -RedirectStandardOutput $config.LogOut -RedirectStandardError $config.LogErr
-}
-catch {
-    Write-RunnerLog "exit 1: could not start npc: $($_.Exception.Message)"
-    exit 1
-}
-Write-RunnerLog "npc started with PID $($process.Id)"
-$timedOut = $false
-if ($expiresAt -gt 0) {
-    $remainingMilliseconds = [int][Math]::Max(1, [Math]::Min([int]::MaxValue, ($expiresAt - $now) * 1000))
-    if (-not $process.WaitForExit($remainingMilliseconds)) {
-        $timedOut = $true
-        Stop-Process -Id $process.Id -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 5
-        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-        $process.WaitForExit()
-    }
-}
-else {
-    $process.WaitForExit()
-}
-if ($timedOut) {
-    Write-RunnerLog 'exit 0: session reached its expiry time'
-    exit 0
-}
-Write-RunnerLog "npc exited with code $($process.ExitCode)"
-if ($process.ExitCode -eq 0 -and ($expiresAt -eq 0 -or [long]([DateTimeOffset]::UtcNow - [DateTimeOffset]'1970-01-01T00:00:00Z').TotalSeconds -lt $expiresAt)) { exit 1 }
-exit $process.ExitCode
-'@
-    Set-Content -Path $runnerPath -Value $runnerContent -Encoding UTF8 -ErrorAction Stop
-
-    $taskName = 'NPS NPC Client'
-    $powerShellArguments = "-NoProfile -ExecutionPolicy Bypass -File `"$runnerPath`""
-    if (Get-Command Register-ScheduledTask -ErrorAction SilentlyContinue) {
-        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
-        $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $powerShellArguments
-        $trigger = New-ScheduledTaskTrigger -AtStartup
-        $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-        # New-ScheduledTaskSettingsSet defaults DisallowStartIfOnBatteries and
-        # StopIfGoingOnBatteries to true, so on any machine reporting battery power
-        # the scheduler silently refuses to start the task and nothing is logged.
-        # A tunnel client has to keep running on battery as well.
-        $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-        Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings | Out-Null
-        Start-ScheduledTask -TaskName $taskName
-    }
-    else {
-        $taskCommand = "powershell.exe $powerShellArguments"
-        & schtasks.exe /Create /TN $taskName /SC ONSTART /RU SYSTEM /RL HIGHEST /TR $taskCommand /F | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw 'Could not create the NPC startup task.' }
-        & schtasks.exe /Run /TN $taskName | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw 'Could not start the NPC startup task.' }
-    }
-
-    return $expiresAt
-}
-
-if (($InstallSsh -or $Autostart) -and -not (Test-IsAdministrator)) {
-    throw 'Administrator PowerShell is required for OpenSSH installation or NPC startup. Set NPC_INSTALL_SSH=0 and NPC_AUTOSTART=0 only if both features are not needed.'
+if ($InstallSsh -and -not (Test-IsAdministrator)) {
+    throw 'Administrator PowerShell is required to install and start OpenSSH Server. Set NPC_INSTALL_SSH=0 to skip it.'
 }
 
 if ($ReplaceExisting) {
@@ -677,102 +538,6 @@ if ([string]::IsNullOrWhiteSpace($VKey)) {
     exit 0
 }
 
-if ($Autostart) {
-    try {
-        $expiresAt = Install-NpcStartupTask -NpcPath $installed -Server $Server -VKey $VKey -Type $Type -TimeoutSeconds $TimeoutSeconds -InstallDir $InstallDir
-
-        # Task Scheduler launches the runner asynchronously, and a cold PowerShell
-        # start on a slow or virtualised machine routinely needs more than the two
-        # seconds this used to allow, which reported a healthy install as failed.
-        $started = $null
-        $deadline = (Get-Date).AddSeconds(30)
-        while ($true) {
-            $started = Get-Process -Name npc -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($started -or (Get-Date) -ge $deadline) { break }
-            Start-Sleep -Milliseconds 500
-        }
-
-        if (-not $started -and ($expiresAt -eq 0 -or (Get-UnixTimeSeconds) -lt $expiresAt)) {
-            # Report enough to tell the two very different causes apart: the task
-            # never ran at all, or it ran and npc exited. The rollback below removes
-            # the task, so everything worth knowing has to be collected here.
-            if (Get-Command Get-ScheduledTaskInfo -ErrorAction SilentlyContinue) {
-                try {
-                    $taskInfo = Get-ScheduledTaskInfo -TaskName 'NPS NPC Client' -ErrorAction Stop
-                    Write-Host "[NPC] Task last run time: $($taskInfo.LastRunTime)"
-                    Write-Host ("[NPC] Task last result: 0x{0:X8}" -f $taskInfo.LastTaskResult)
-                }
-                catch {
-                    Write-Host '[NPC] Could not read the startup task state.'
-                }
-            }
-
-            # The runner records every decision it makes, including the paths that
-            # exit successfully with nothing started. That log is what says whether
-            # the runner ran at all, so report it first and separately from npc's
-            # own output.
-            $runnerLogPath = Join-Path $InstallDir 'npc-startup.log'
-            $runnerLogTail = @()
-            if (Test-Path -LiteralPath $runnerLogPath) {
-                $runnerLogTail = @(Get-Content -LiteralPath $runnerLogPath -Tail 15 -ErrorAction SilentlyContinue)
-            }
-            if ($runnerLogTail.Count -gt 0) {
-                Write-Host "[NPC] $runnerLogPath (last $($runnerLogTail.Count) lines):"
-                $runnerLogTail | ForEach-Object { Write-Host "    $_" }
-            }
-            else {
-                Write-Host "[NPC] $runnerLogPath has no entries, so the runner never ran."
-                Write-Host '[NPC] Check Task Scheduler history for "NPS NPC Client", and check whether'
-                Write-Host '[NPC] a machine execution policy blocks the runner: Get-ExecutionPolicy -List'
-            }
-
-            foreach ($logPath in @((Join-Path $InstallDir 'npc-error.log'), (Join-Path $InstallDir 'npc.log'))) {
-                if (-not (Test-Path -LiteralPath $logPath)) {
-                    Write-Host "[NPC] $logPath was never created."
-                    continue
-                }
-                $tail = @(Get-Content -LiteralPath $logPath -Tail 15 -ErrorAction SilentlyContinue)
-                if ($tail.Count -eq 0) {
-                    Write-Host "[NPC] $logPath is empty."
-                    continue
-                }
-                Write-Host "[NPC] $logPath (last $($tail.Count) lines):"
-                $tail | ForEach-Object { Write-Host "    $_" }
-            }
-
-            throw 'The NPC startup task was created, but npc.exe did not remain running. Check npc-error.log and Task Scheduler.'
-        }
-    }
-    catch {
-        if ($KeepOnFailure) {
-            # Troubleshooting only. The task and the stored vkey survive, so the
-            # failure can be inspected, at the cost of leaving credentials on disk.
-            Write-Host '[NPC] NPC_KEEP_ON_FAILURE is set, so the task and config are being left in place.'
-            Write-Host '[NPC] Remove them yourself once done: the "NPS NPC Client" task and npc-startup.json.'
-            throw
-        }
-        # Leave nothing behind that could keep reconnecting with the previous vkey.
-        Write-Host '[NPC] Startup installation failed; removing the task and the stored credentials.'
-        # Must not mask the original failure if cleanup itself cannot finish.
-        try { Stop-NpcRuntime -InstallDir $InstallDir } catch { Write-Host "[NPC] Cleanup warning: $($_.Exception.Message)" }
-        Remove-Item -LiteralPath (Join-Path $InstallDir 'npc-startup.json') -Force -ErrorAction SilentlyContinue
-        throw
-    }
-    Write-Host '[NPC] Started by Task Scheduler and enabled at boot.'
-    if ($started) { Write-Host "[NPC] PID: $($started.Id)" }
-    Write-Host '[NPC] Startup task: NPS NPC Client'
-    Write-Host "[NPC] Server: $Server"
-    Write-Host "[NPC] Local SSH target: 127.0.0.1:$SshPort"
-    Write-Host "[NPC] Log: $(Join-Path $InstallDir 'npc.log')"
-    if ($TimeoutSeconds -gt 0) {
-        Write-Host "[NPC] Absolute expiry: $expiresAt (Unix time); reboot does not reset it."
-    }
-    else {
-        Write-Host '[NPC] Automatic stop: disabled'
-    }
-    exit 0
-}
-
 # With NPC_REPLACE_EXISTING=0 the previous process is left alone, so this install
 # stops here instead of running a second client against the same SSH port.
 if (-not $ReplaceExisting) {
@@ -848,6 +613,8 @@ Stop-Process -Id $TargetProcessId -Force -ErrorAction SilentlyContinue
         Write-Host '[NPC] Automatic stop: disabled'
     }
 
+    Write-Host '[NPC] Not started at boot: run this command again after a reboot.'
+
     if (Test-Path $logOut) { Get-Content $logOut -Tail 10 -ErrorAction SilentlyContinue }
     if (Test-Path $logErr) { Get-Content $logErr -Tail 10 -ErrorAction SilentlyContinue }
 }
@@ -855,5 +622,13 @@ else {
     Write-Host '[NPC] Process exited shortly after start.'
     if (Test-Path $logOut) { Get-Content $logOut -ErrorAction SilentlyContinue }
     if (Test-Path $logErr) { Get-Content $logErr -ErrorAction SilentlyContinue }
-    throw "npc.exe exited with code $($proc.ExitCode)"
+    # Start-Process -PassThru with redirected output returns a process whose
+    # ExitCode cannot be read on Windows PowerShell 5.1, so do not print an
+    # empty value as if it were the code.
+    $exitCode = $null
+    try { $exitCode = $proc.ExitCode } catch { $exitCode = $null }
+    if ($null -ne $exitCode) {
+        throw "npc.exe exited with code $exitCode"
+    }
+    throw 'npc.exe exited immediately after starting. See the log output above.'
 }
