@@ -1,4 +1,9 @@
 $ErrorActionPreference = 'Stop'
+# This script is normally piped into iex with no console attached to answer a
+# prompt, so nothing here may stop and wait for input.
+$ConfirmPreference = 'None'
+# Also makes Invoke-WebRequest markedly faster on Windows PowerShell 5.1.
+$ProgressPreference = 'SilentlyContinue'
 
 $Version = if ($env:NPC_VERSION) { $env:NPC_VERSION } else { '0.26.10' }
 $ReleaseBase = if ($env:NPC_RELEASE_BASE) { $env:NPC_RELEASE_BASE.TrimEnd('/') } else { 'https://dl.runsh.de/npc' }
@@ -622,9 +627,33 @@ if ([string]::IsNullOrWhiteSpace($VKey)) {
 if ($Autostart) {
     try {
         $expiresAt = Install-NpcStartupTask -NpcPath $installed -Server $Server -VKey $VKey -Type $Type -TimeoutSeconds $TimeoutSeconds -InstallDir $InstallDir
-        Start-Sleep -Seconds 2
-        $started = Get-Process -Name npc -ErrorAction SilentlyContinue | Select-Object -First 1
+
+        # Task Scheduler launches the runner asynchronously, and a cold PowerShell
+        # start on a slow or virtualised machine routinely needs more than the two
+        # seconds this used to allow, which reported a healthy install as failed.
+        $started = $null
+        $deadline = (Get-Date).AddSeconds(30)
+        while ($true) {
+            $started = Get-Process -Name npc -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($started -or (Get-Date) -ge $deadline) { break }
+            Start-Sleep -Milliseconds 500
+        }
+
         if (-not $started -and ($expiresAt -eq 0 -or (Get-UnixTimeSeconds) -lt $expiresAt)) {
+            # Show why it exited instead of making the operator go and find the logs.
+            $startupLogs = @(
+                (Join-Path $InstallDir 'npc-error.log'),
+                (Join-Path $InstallDir 'npc.log')
+            )
+            foreach ($logPath in $startupLogs) {
+                if (Test-Path -LiteralPath $logPath) {
+                    $tail = @(Get-Content -LiteralPath $logPath -Tail 15 -ErrorAction SilentlyContinue)
+                    if ($tail.Count -gt 0) {
+                        Write-Host "[NPC] $logPath (last $($tail.Count) lines):"
+                        $tail | ForEach-Object { Write-Host "    $_" }
+                    }
+                }
+            }
             throw 'The NPC startup task was created, but npc.exe did not remain running. Check npc-error.log and Task Scheduler.'
         }
     }
@@ -632,7 +661,7 @@ if ($Autostart) {
         # Leave nothing behind that could keep reconnecting with the previous vkey.
         Write-Host '[NPC] Startup installation failed; removing the task and the stored credentials.'
         # Must not mask the original failure if cleanup itself cannot finish.
-        try { Stop-NpcRuntime } catch { Write-Host "[NPC] Cleanup warning: $($_.Exception.Message)" }
+        try { Stop-NpcRuntime -InstallDir $InstallDir } catch { Write-Host "[NPC] Cleanup warning: $($_.Exception.Message)" }
         Remove-Item -LiteralPath (Join-Path $InstallDir 'npc-startup.json') -Force -ErrorAction SilentlyContinue
         throw
     }
