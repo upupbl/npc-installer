@@ -511,7 +511,11 @@ exit $process.ExitCode
         $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $powerShellArguments
         $trigger = New-ScheduledTaskTrigger -AtStartup
         $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-        $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero)
+        # New-ScheduledTaskSettingsSet defaults DisallowStartIfOnBatteries and
+        # StopIfGoingOnBatteries to true, so on any machine reporting battery power
+        # the scheduler silently refuses to start the task and nothing is logged.
+        # A tunnel client has to keep running on battery as well.
+        $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
         Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings | Out-Null
         Start-ScheduledTask -TaskName $taskName
     }
@@ -619,8 +623,12 @@ if ([string]::IsNullOrWhiteSpace($VKey)) {
     if ($ReplaceExisting) {
         Write-Host '[NPC] The previous session was stopped, so no NPC connection is active now.'
     }
-    Write-Host 'Run manually:'
-    Write-Host "  $installed -server=$Server -vkey=YOUR_VKEY -type=$Type"
+    # Each argument is quoted on purpose. Windows PowerShell 5.1 splits an unquoted
+    # -server=1.2.3.4:5 into two arguments, and Go's flag package stops parsing at
+    # the first non-flag argument, so -vkey is silently dropped and npc falls back
+    # to config file mode and exits.
+    Write-Host 'Run manually (keep the quotes):'
+    Write-Host "  & '$installed' '-server=$Server' '-vkey=YOUR_VKEY' '-type=$Type'"
     exit 0
 }
 
@@ -640,20 +648,44 @@ if ($Autostart) {
         }
 
         if (-not $started -and ($expiresAt -eq 0 -or (Get-UnixTimeSeconds) -lt $expiresAt)) {
-            # Show why it exited instead of making the operator go and find the logs.
-            $startupLogs = @(
-                (Join-Path $InstallDir 'npc-error.log'),
-                (Join-Path $InstallDir 'npc.log')
-            )
-            foreach ($logPath in $startupLogs) {
-                if (Test-Path -LiteralPath $logPath) {
-                    $tail = @(Get-Content -LiteralPath $logPath -Tail 15 -ErrorAction SilentlyContinue)
-                    if ($tail.Count -gt 0) {
-                        Write-Host "[NPC] $logPath (last $($tail.Count) lines):"
-                        $tail | ForEach-Object { Write-Host "    $_" }
-                    }
+            # Report enough to tell the two very different causes apart: the task
+            # never ran at all, or it ran and npc exited. The rollback below removes
+            # the task, so everything worth knowing has to be collected here.
+            if (Get-Command Get-ScheduledTaskInfo -ErrorAction SilentlyContinue) {
+                try {
+                    $taskInfo = Get-ScheduledTaskInfo -TaskName 'NPS NPC Client' -ErrorAction Stop
+                    Write-Host "[NPC] Task last run time: $($taskInfo.LastRunTime)"
+                    Write-Host ("[NPC] Task last result: 0x{0:X8}" -f $taskInfo.LastTaskResult)
+                }
+                catch {
+                    Write-Host '[NPC] Could not read the startup task state.'
                 }
             }
+
+            $sawLogOutput = $false
+            foreach ($logPath in @((Join-Path $InstallDir 'npc-error.log'), (Join-Path $InstallDir 'npc.log'))) {
+                if (-not (Test-Path -LiteralPath $logPath)) {
+                    Write-Host "[NPC] $logPath was never created."
+                    continue
+                }
+                $tail = @(Get-Content -LiteralPath $logPath -Tail 15 -ErrorAction SilentlyContinue)
+                if ($tail.Count -eq 0) {
+                    Write-Host "[NPC] $logPath is empty."
+                    continue
+                }
+                $sawLogOutput = $true
+                Write-Host "[NPC] $logPath (last $($tail.Count) lines):"
+                $tail | ForEach-Object { Write-Host "    $_" }
+            }
+
+            if (-not $sawLogOutput) {
+                # No log file means npc was never launched, so the runner itself did
+                # not get to run. Point at the scheduler rather than at npc.
+                Write-Host '[NPC] No npc output at all, so the startup task did not reach npc.exe.'
+                Write-Host '[NPC] Check Task Scheduler history for "NPS NPC Client", and check whether'
+                Write-Host '[NPC] a machine execution policy blocks the runner: Get-ExecutionPolicy -List'
+            }
+
             throw 'The NPC startup task was created, but npc.exe did not remain running. Check npc-error.log and Task Scheduler.'
         }
     }
